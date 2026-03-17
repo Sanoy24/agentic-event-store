@@ -1,0 +1,445 @@
+# src/commands/handlers.py
+# =============================================================================
+# TRP1 LEDGER — Command Handlers
+# =============================================================================
+# Source: Challenge Doc Phase 2 p.9 (Command Handler Pattern — implement exactly)
+#
+# The command handler pattern from the challenge spec must be followed exactly:
+#   1. Reconstruct current aggregate state from event history (NOT projections)
+#   2. Validate all business rules BEFORE any state change
+#   3. Determine new events — pure logic, no I/O
+#   4. Append atomically with optimistic concurrency
+#
+# Every command carries correlation_id: str (required, not optional).
+# This satisfies the Causal Tracing Reflex behaviour (Manual p.17).
+# =============================================================================
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timezone
+from decimal import Decimal
+
+import structlog
+from pydantic import BaseModel, ConfigDict, Field
+
+from src.aggregates.agent_session import AgentSessionAggregate
+from src.aggregates.loan_application import (
+    ApplicationState,
+    LoanApplicationAggregate,
+)
+from src.event_store import EventStore
+from src.models.events import (
+    AgentContextLoaded,
+    ApplicationApproved,
+    ApplicationSubmitted,
+    CreditAnalysisCompleted,
+    CreditAnalysisRequested,
+    DecisionGenerated,
+    DomainError,
+    LoanPurpose,
+    Recommendation,
+    RiskTier,
+)
+
+logger = structlog.get_logger()
+
+
+# =============================================================================
+# Command Models (Pydantic v2)
+# =============================================================================
+
+class SubmitApplicationCommand(BaseModel):
+    """Command to submit a new loan application."""
+    model_config = ConfigDict(frozen=True)
+
+    application_id: str
+    applicant_id: str
+    applicant_name: str  # Denormalised — Manual Pattern 1 (line 665)
+    requested_amount_usd: Decimal = Field(gt=0)
+    loan_purpose: LoanPurpose
+    submission_channel: str
+    correlation_id: str  # Required — not optional (Causal Tracing Reflex)
+
+
+class CreditAnalysisCompletedCommand(BaseModel):
+    """Command to record completion of credit analysis by an AI agent."""
+    model_config = ConfigDict(frozen=True)
+
+    application_id: str
+    agent_id: str
+    session_id: str
+    model_version: str
+    model_deployment_id: str  # Specific deployment (Manual Pattern 2)
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    risk_tier: RiskTier
+    recommended_limit_usd: Decimal = Field(gt=0)
+    duration_ms: int = Field(ge=0)
+    input_data: dict  # Raw input — will be hashed
+    regulatory_basis: list[str] = []  # Regulation IDs (Manual Pattern 2)
+    correlation_id: str
+    causation_id: str | None = None
+
+
+class StartAgentSessionCommand(BaseModel):
+    """Command to start a new agent session (Gas Town: first event)."""
+    model_config = ConfigDict(frozen=True)
+
+    agent_id: str
+    session_id: str
+    context_source: str
+    event_replay_from_position: int = Field(ge=0, default=0)
+    context_token_count: int = Field(ge=0)
+    model_version: str
+    correlation_id: str
+
+
+class GenerateDecisionCommand(BaseModel):
+    """Command to generate a decision for a loan application."""
+    model_config = ConfigDict(frozen=True)
+
+    application_id: str
+    orchestrator_agent_id: str
+    recommendation: Recommendation
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    contributing_agent_sessions: list[str]
+    decision_basis_summary: str
+    model_versions: dict[str, str]
+    correlation_id: str
+    causation_id: str | None = None
+
+
+class ApproveApplicationCommand(BaseModel):
+    """Command to approve a loan application."""
+    model_config = ConfigDict(frozen=True)
+
+    application_id: str
+    approved_amount_usd: Decimal = Field(gt=0)
+    interest_rate: Decimal = Field(gt=0)
+    conditions: list[str] = []
+    approved_by: str
+    correlation_id: str
+    causation_id: str | None = None
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+def hash_inputs(input_data: dict) -> str:
+    """
+    Hash input data for causal provenance tracking.
+    Ensures reproducibility: given the same inputs, the same hash is produced.
+    (Manual Pattern 2, p.22 — input_data_hash on decision events)
+    """
+    import json
+    canonical = json.dumps(input_data, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+# =============================================================================
+# Command Handlers
+# =============================================================================
+
+async def handle_submit_application(
+    cmd: SubmitApplicationCommand,
+    store: EventStore,
+) -> None:
+    """
+    Creates a new LoanApplication stream.
+    expected_version = -1 (new stream).
+
+    Validates: no existing stream for this application_id (duplicate check).
+    Produces: ApplicationSubmitted event.
+
+    Pattern: load → validate → determine → append
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    # 1. Check for existing stream (duplicate detection)
+    existing_version = await store.stream_version(f"loan-{cmd.application_id}")
+    if existing_version > 0:
+        raise DomainError(
+            f"Application {cmd.application_id} already exists "
+            f"at version {existing_version}."
+        )
+
+    # 2. No validation needed — this is a new application
+
+    # 3. Determine new events
+    now = datetime.now(timezone.utc)
+    new_events = [
+        ApplicationSubmitted(
+            application_id=cmd.application_id,
+            applicant_id=cmd.applicant_id,
+            applicant_name=cmd.applicant_name,
+            requested_amount_usd=cmd.requested_amount_usd,
+            loan_purpose=cmd.loan_purpose,
+            submission_channel=cmd.submission_channel,
+            submitted_at=now,
+        ),
+    ]
+
+    # 4. Append atomically — new stream (expected_version = -1)
+    await store.append(
+        stream_id=f"loan-{cmd.application_id}",
+        events=new_events,
+        expected_version=-1,
+        correlation_id=cmd.correlation_id,
+    )
+
+    log.info("application_submitted", applicant_id=cmd.applicant_id)
+
+
+async def handle_credit_analysis_completed(
+    cmd: CreditAnalysisCompletedCommand,
+    store: EventStore,
+) -> None:
+    """
+    Exact implementation from Challenge Doc p.9-10.
+
+    1. Load LoanApplicationAggregate and AgentSessionAggregate
+    2. Validate:
+       - app.assert_awaiting_credit_analysis()
+       - agent.assert_context_loaded()            ← Gas Town
+       - agent.assert_model_version_current()
+       - app.assert_credit_analysis_not_done()    ← Rule 3: model version locking
+    3. Determine events:
+       - confidence_floor = LoanApplicationAggregate.enforce_confidence_floor()
+       - CreditAnalysisCompleted event
+    4. Append to loan stream with app.version as expected_version
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+        agent_id=cmd.agent_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    # 1. Reconstruct current aggregate state from event history
+    app = await LoanApplicationAggregate.load(store, cmd.application_id)
+    agent = await AgentSessionAggregate.load(store, cmd.agent_id, cmd.session_id)
+
+    # 2. Validate — all business rules checked BEFORE any state change
+    app.assert_awaiting_credit_analysis()
+    agent.assert_context_loaded()                     # Gas Town pattern
+    agent.assert_model_version_current(cmd.model_version)
+    app.assert_credit_analysis_not_done()             # Rule 3: model version locking
+
+    # 3. Determine new events — pure logic, no I/O
+    # Rule 4: enforce confidence floor
+    LoanApplicationAggregate.enforce_confidence_floor(
+        cmd.confidence_score, cmd.risk_tier
+    )
+
+    new_events = [
+        CreditAnalysisCompleted(
+            application_id=cmd.application_id,
+            agent_id=cmd.agent_id,
+            session_id=cmd.session_id,
+            model_version=cmd.model_version,
+            model_deployment_id=cmd.model_deployment_id,
+            confidence_score=cmd.confidence_score,
+            risk_tier=cmd.risk_tier,
+            recommended_limit_usd=cmd.recommended_limit_usd,
+            analysis_duration_ms=cmd.duration_ms,
+            input_data_hash=hash_inputs(cmd.input_data),
+            regulatory_basis=cmd.regulatory_basis,
+        ),
+    ]
+
+    # 4. Append atomically — optimistic concurrency enforced by store
+    await store.append(
+        stream_id=f"loan-{cmd.application_id}",
+        events=new_events,
+        expected_version=app.version,
+        correlation_id=cmd.correlation_id,
+        causation_id=cmd.causation_id,
+    )
+
+    log.info(
+        "credit_analysis_completed",
+        risk_tier=cmd.risk_tier,
+        confidence_score=cmd.confidence_score,
+    )
+
+
+async def handle_start_agent_session(
+    cmd: StartAgentSessionCommand,
+    store: EventStore,
+) -> None:
+    """
+    Creates AgentSession stream. expected_version = -1.
+    Produces: AgentContextLoaded event (Gas Town: first event in session).
+
+    "No agent may make a decision without first declaring its context source."
+    (Challenge Doc p.10, Rule 2)
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        agent_id=cmd.agent_id,
+        session_id=cmd.session_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    # 1. Check for existing session (duplicate detection)
+    stream_id = f"agent-{cmd.agent_id}-{cmd.session_id}"
+    existing_version = await store.stream_version(stream_id)
+    if existing_version > 0:
+        raise DomainError(
+            f"AgentSession {cmd.agent_id}/{cmd.session_id} already exists."
+        )
+
+    # 2. No additional validation — this is a new session
+
+    # 3. Determine new events — Gas Town: AgentContextLoaded is ALWAYS first
+    new_events = [
+        AgentContextLoaded(
+            agent_id=cmd.agent_id,
+            session_id=cmd.session_id,
+            context_source=cmd.context_source,
+            event_replay_from_position=cmd.event_replay_from_position,
+            context_token_count=cmd.context_token_count,
+            model_version=cmd.model_version,
+        ),
+    ]
+
+    # 4. Append atomically — new stream (expected_version = -1)
+    await store.append(
+        stream_id=stream_id,
+        events=new_events,
+        expected_version=-1,
+        correlation_id=cmd.correlation_id,
+    )
+
+    log.info(
+        "agent_session_started",
+        model_version=cmd.model_version,
+        context_source=cmd.context_source,
+    )
+
+
+async def handle_generate_decision(
+    cmd: GenerateDecisionCommand,
+    store: EventStore,
+) -> None:
+    """
+    Rule 4: enforce confidence floor before creating DecisionGenerated event.
+    Rule 6: assert contributing_sessions are all valid for this application_id.
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    # 1. Reconstruct aggregate state
+    app = await LoanApplicationAggregate.load(store, cmd.application_id)
+
+    # 2. Validate business rules
+    if app.state != ApplicationState.PENDING_DECISION:
+        raise DomainError(
+            f"Application {cmd.application_id} is in state {app.state}, "
+            f"expected {ApplicationState.PENDING_DECISION} for decision generation."
+        )
+
+    # Rule 6: assert contributing sessions valid
+    app.assert_contributing_sessions_valid(
+        cmd.contributing_agent_sessions, cmd.application_id
+    )
+
+    # Rule 4: enforce confidence floor
+    final_recommendation = LoanApplicationAggregate.enforce_confidence_floor(
+        cmd.confidence_score, cmd.recommendation
+    )
+
+    # 3. Determine new events
+    new_events = [
+        DecisionGenerated(
+            application_id=cmd.application_id,
+            orchestrator_agent_id=cmd.orchestrator_agent_id,
+            recommendation=Recommendation(final_recommendation),
+            confidence_score=cmd.confidence_score,
+            contributing_agent_sessions=cmd.contributing_agent_sessions,
+            decision_basis_summary=cmd.decision_basis_summary,
+            model_versions=cmd.model_versions,
+        ),
+    ]
+
+    # 4. Append atomically
+    await store.append(
+        stream_id=f"loan-{cmd.application_id}",
+        events=new_events,
+        expected_version=app.version,
+        correlation_id=cmd.correlation_id,
+        causation_id=cmd.causation_id,
+    )
+
+    log.info(
+        "decision_generated",
+        recommendation=final_recommendation,
+        confidence_score=cmd.confidence_score,
+    )
+
+
+async def handle_application_approved(
+    cmd: ApproveApplicationCommand,
+    store: EventStore,
+) -> None:
+    """
+    Rule 5: assert compliance_complete before appending ApplicationApproved.
+
+    "An ApplicationApproved event cannot be appended unless all
+    ComplianceRulePassed events for the application's required checks
+    are present in the ComplianceRecord stream."
+    (Challenge Doc p.10)
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    # 1. Reconstruct aggregate state
+    app = await LoanApplicationAggregate.load(store, cmd.application_id)
+
+    # 2. Validate
+    if app.state != ApplicationState.APPROVED_PENDING_HUMAN:
+        raise DomainError(
+            f"Application {cmd.application_id} is in state {app.state}, "
+            f"expected {ApplicationState.APPROVED_PENDING_HUMAN} for approval."
+        )
+
+    # Rule 5: compliance must be complete
+    app.assert_compliance_complete()
+
+    # 3. Determine new events
+    now = datetime.now(timezone.utc)
+    new_events = [
+        ApplicationApproved(
+            application_id=cmd.application_id,
+            approved_amount_usd=cmd.approved_amount_usd,
+            interest_rate=cmd.interest_rate,
+            conditions=cmd.conditions,
+            approved_by=cmd.approved_by,
+            effective_date=now,
+        ),
+    ]
+
+    # 4. Append atomically
+    await store.append(
+        stream_id=f"loan-{cmd.application_id}",
+        events=new_events,
+        expected_version=app.version,
+        correlation_id=cmd.correlation_id,
+        causation_id=cmd.causation_id,
+    )
+
+    log.info(
+        "application_approved",
+        approved_amount=str(cmd.approved_amount_usd),
+        approved_by=cmd.approved_by,
+    )
