@@ -104,27 +104,11 @@ trp1-ledger/
 
 ## Technology Stack
 
-| Component | Package | Version |
-|-----------|---------|---------|
-| Runtime | Python | ≥3.12 |
-| Database | psycopg[binary,pool] | ≥3.2 |
-| Validation | pydantic | ≥2.7 |
-| Logging | structlog | ≥24.0 |
-| Async | anyio | ≥4.0 |
-| Testing | pytest + pytest-asyncio + testcontainers | ≥8.0, ≥0.24, ≥4.0 |
-
-## Interim Submission Status
-
-### ✅ Phase 0 — Domain Reconnaissance
-- DOMAIN_NOTES.md: All 6 questions answered
-
-### ✅ Phase 1 — Event Store Core
-- PostgreSQL schema with all tables, indexes, and constraints
-- EventStore async class with full interface
-- Double-decision concurrency test passing
-
-### ✅ Phase 2 — Domain Logic
-- LoanApplicationAggregate with full state machine
-- AgentSessionAggregate with Gas Town enforcement
-- Command handlers for all required operations
-- All 6 business rules enforced in aggregate layer
+| Component  | Package                                  | Version           |
+| ---------- | ---------------------------------------- | ----------------- |
+| Runtime    | Python                                   | ≥3.12             |
+| Database   | psycopg[binary,pool]                     | ≥3.2              |
+| Validation | pydantic                                 | ≥2.7              |
+| Logging    | structlog                                | ≥24.0             |
+| Async      | anyio                                    | ≥4.0              |
+| Testing    | pytest + pytest-asyncio + testcontainers | ≥8.0, ≥0.24, ≥4.0 |
