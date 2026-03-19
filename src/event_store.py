@@ -316,6 +316,41 @@ class EventStore:
 
             return events
 
+    async def load_application_events(
+        self,
+        application_id: str,
+    ) -> list[StoredEvent]:
+        """
+        Load all events related to an application across loan, agent-session,
+        and compliance streams in global_position order.
+
+        This lets command-side state reconstruction enforce business rules that
+        depend on multiple aggregates while still using the loan stream version
+        for optimistic concurrency on loan commands.
+        """
+        stream_id = f"loan-{application_id}"
+
+        async with self._pool.connection() as conn:
+            result = await conn.execute(
+                """
+                SELECT event_id, stream_id, stream_position, global_position,
+                       event_type, event_version, payload, metadata, recorded_at
+                FROM events
+                WHERE stream_id = %s
+                   OR payload->>'application_id' = %s
+                ORDER BY global_position ASC
+                """,
+                (stream_id, application_id),
+            )
+
+            rows = await result.fetchall()
+            events = [self._row_to_stored_event(row) for row in rows]
+
+            if self._upcasters is not None:
+                events = [self._upcasters.upcast(e) for e in events]
+
+            return events
+
     async def load_all(
         self,
         from_global_position: int = 0,
