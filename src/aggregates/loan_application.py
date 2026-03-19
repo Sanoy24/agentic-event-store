@@ -108,7 +108,7 @@ class LoanApplicationAggregate:
         (Manual p.5: "Command handlers must reconstruct aggregate state by replaying
         events." Reading from a projection in a command handler violates CQRS.)
         """
-        events = await store.load_stream(f"loan-{application_id}")
+        events = await store.load_application_events(application_id)
         agg = cls(application_id=application_id)
         for event in events:
             agg._apply(event)
@@ -123,7 +123,8 @@ class LoanApplicationAggregate:
         handler = getattr(self, f"_on_{event.event_type}", None)
         if handler:
             handler(event)
-        self.version = event.stream_position
+        if event.stream_id == f"loan-{self.application_id}":
+            self.version = event.stream_position
 
     def _on_ApplicationSubmitted(self, event: StoredEvent) -> None:
         """Initial state: application submitted."""
@@ -245,7 +246,12 @@ class LoanApplicationAggregate:
                 f"recorded. Cannot submit another without HumanReviewOverride."
             )
 
-    def assert_compliance_complete(self) -> None:
+    def assert_compliance_complete(
+        self,
+        required_checks: list[str],
+        passed_checks: list[str],
+        clearance_issued: bool,
+    ) -> None:
         """
         Rule 5: All required compliance checks must be passed before approval.
         Checks: set(compliance_required_checks) ⊆ set(compliance_passed_checks)
@@ -255,9 +261,14 @@ class LoanApplicationAggregate:
         are present in the ComplianceRecord stream."
         (Challenge Doc p.10)
         """
-        required = set(self.compliance_required_checks)
-        passed = set(self.compliance_passed_checks)
+        required = set(required_checks)
+        passed = set(passed_checks)
         missing = required - passed
+        if not clearance_issued:
+            raise DomainError(
+                f"Application {self.application_id}: compliance clearance "
+                "has not been issued."
+            )
         if missing:
             raise DomainError(
                 f"Application {self.application_id}: compliance checks incomplete. "
@@ -268,6 +279,7 @@ class LoanApplicationAggregate:
         self,
         session_ids: list[str],
         application_id: str,
+        valid_session_ids: set[str],
     ) -> None:
         """
         Rule 6: All contributing_agent_sessions must reference sessions that
@@ -281,6 +293,12 @@ class LoanApplicationAggregate:
             raise DomainError(
                 f"Application {application_id}: DecisionGenerated must reference "
                 f"at least one contributing agent session."
+            )
+        invalid = sorted(session_id for session_id in session_ids if session_id not in valid_session_ids)
+        if invalid:
+            raise DomainError(
+                f"Application {application_id}: contributing sessions do not "
+                f"contain decisions for this application: {invalid}"
             )
 
     @staticmethod
