@@ -1,6 +1,6 @@
-# TRP1 Ledger — Interim Submission Report
+# TRP1 Ledger - Interim Submission Report
 
-**Candidate Submission — Thursday 03:00 UTC Deadline**
+**Candidate Submission - Interim Deadline: Sunday March 22, 03:00 UTC**
 
 ---
 
@@ -89,7 +89,7 @@ graph TB
     AL_STREAM --- AL_EVENTS
 ```
 
-### 2.3 Command Flow — The 4-Step Handler Pattern
+### 2.3 Command Flow - The 4-Step Handler Pattern
 
 ```mermaid
 sequenceDiagram
@@ -100,22 +100,22 @@ sequenceDiagram
     participant DB as PostgreSQL
 
     Client->>Handler: SubmitApplicationCommand
-    Note over Handler: Step 1 — Reconstruct State
-    Handler->>Store: load_stream("loan-{id}")
-    Store->>DB: SELECT ... FROM events WHERE stream_id = %s
+    Note over Handler: Step 1 - Reconstruct State
+    Handler->>Store: load_application_events(application_id)
+    Store->>DB: SELECT related events across loan/agent/compliance streams
     DB-->>Store: rows[]
     Store-->>Handler: StoredEvent[]
-    Handler->>Agg: LoanApplicationAggregate.load(events)
-    Note over Agg: Replay events → rebuild state
+    Handler->>Agg: LoanApplicationAggregate.load(...)
+    Note over Agg: Replay events -> rebuild state
 
-    Note over Handler: Step 2 — Validate Business Rules
+    Note over Handler: Step 2 - Validate Business Rules
     Handler->>Agg: assert_valid_transition()
     Agg-->>Handler: OK or DomainError
 
-    Note over Handler: Step 3 — Determine New Events
-    Handler->>Handler: Create ApplicationSubmitted event
+    Note over Handler: Step 3 - Determine New Events
+    Handler->>Handler: Create domain event(s)
 
-    Note over Handler: Step 4 — Append Atomically
+    Note over Handler: Step 4 - Append Atomically
     Handler->>Store: append(stream_id, events, expected_version)
     Store->>DB: BEGIN TRANSACTION
     Store->>DB: SELECT current_version FOR UPDATE
@@ -139,13 +139,13 @@ stateDiagram-v2
     COMPLIANCE_REVIEW --> PENDING_DECISION : ComplianceClearanceIssued
     PENDING_DECISION --> APPROVED_PENDING_HUMAN : DecisionGenerated (APPROVE)
     PENDING_DECISION --> DECLINED_PENDING_HUMAN : DecisionGenerated (DECLINE/REFER)
-    APPROVED_PENDING_HUMAN --> FINAL_APPROVED : HumanReviewCompleted
-    DECLINED_PENDING_HUMAN --> FINAL_DECLINED : HumanReviewCompleted
+    APPROVED_PENDING_HUMAN --> FINAL_APPROVED : HumanReviewCompleted / ApplicationApproved
+    DECLINED_PENDING_HUMAN --> FINAL_DECLINED : HumanReviewCompleted / ApplicationDeclined
     FINAL_APPROVED --> [*]
     FINAL_DECLINED --> [*]
 ```
 
-### 2.5 Double-Decision Concurrency — OCC Mechanism
+### 2.5 Double-Decision Concurrency - OCC Mechanism
 
 ```mermaid
 sequenceDiagram
@@ -163,20 +163,20 @@ sequenceDiagram
 
     ES->>DB: SELECT current_version FOR UPDATE (Agent A)
     Note over DB: Row lock acquired by A
-    DB-->>ES: version = 3 ✓
+    DB-->>ES: version = 3
     ES->>DB: INSERT event at position 4
     ES->>DB: UPDATE version = 4
     ES->>DB: COMMIT (lock released)
 
     ES->>DB: SELECT current_version FOR UPDATE (Agent B)
     Note over DB: Lock released, B proceeds
-    DB-->>ES: version = 4 ✗ (expected 3)
+    DB-->>ES: version = 4 (expected 3)
     ES->>DB: ROLLBACK
 
     ES-->>A: Success (new_version = 4)
     ES-->>B: OptimisticConcurrencyError(expected=3, actual=4)
 
-    Note over B: Must reload stream,<br/>check if analysis still relevant,<br/>then retry or abort
+    Note over B: Must reload stream,<br/>check if analysis is still relevant,<br/>then retry or abort
 ```
 
 ---
@@ -185,101 +185,113 @@ sequenceDiagram
 
 ### What Is Working (Phase 1 + Phase 2)
 
-**Phase 1 — Event Store Core ✅ Complete**
+**Phase 1 - Event Store Core Complete**
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| PostgreSQL Schema | ✅ | All 4 tables, 6 indexes (including BRIN), constraints, column-level justifications |
-| `EventStore.append()` | ✅ | Atomic write with OCC, outbox in same transaction, metadata envelope |
-| `EventStore.load_stream()` | ✅ | Position-bounded reads, optional upcaster support |
-| `EventStore.load_all()` | ✅ | Async generator with batching, event type filtering |
-| `EventStore.stream_version()` | ✅ | O(1) lookup via `event_streams` primary key |
-| `EventStore.archive_stream()` | ✅ | Soft archive with `archived_at`, rejects future appends |
-| `EventStore.get_stream_metadata()` | ✅ | Full `StreamMetadata` return |
-| Double-Decision Test | ✅ | 2 concurrent tasks, exactly 1 succeeds, 1 gets OCC error, total = 4 events |
+| PostgreSQL schema | Complete | All 4 tables implemented: `events`, `event_streams`, `projection_checkpoints`, `outbox` |
+| `EventStore.append()` | Complete | Atomic write with OCC, outbox in same transaction, metadata envelope |
+| `EventStore.load_stream()` | Complete | Position-bounded stream reads |
+| `EventStore.load_application_events()` | Complete | Cross-stream replay for application-scoped validation across loan, agent-session, and compliance streams |
+| `EventStore.load_all()` | Complete | Async generator with batching and optional event-type filtering |
+| `EventStore.stream_version()` | Complete | O(1) lookup via `event_streams` primary key |
+| `EventStore.archive_stream()` | Complete | Soft archive with `archived_at`, rejects future appends |
+| `EventStore.get_stream_metadata()` | Complete | Full `StreamMetadata` return |
+| Double-decision concurrency test | Complete | 2 concurrent tasks, exactly 1 succeeds, 1 gets OCC error, total = 4 events |
 
-**Phase 2 — Domain Logic ✅ Complete**
+**Phase 2 - Domain Logic Complete**
 
 | Component | Status | Details |
 |-----------|--------|---------|
-| `LoanApplicationAggregate` | ✅ | 9-state machine, event replay via `load()`, `_apply` pattern |
-| `AgentSessionAggregate` | ✅ | Gas Town enforcement, model version checking |
-| Business Rule 1 (State machine) | ✅ | `VALID_TRANSITIONS` map, `InvalidStateTransitionError` |
-| Business Rule 2 (Gas Town) | ✅ | `assert_context_loaded()` — no decisions without context |
-| Business Rule 3 (Model lock) | ✅ | `assert_model_version_current()` |
-| Business Rule 4 (Confidence floor) | ✅ | `confidence_score < 0.6 → REFER` enforced in aggregate |
-| Command Handlers | ✅ | `handle_submit_application`, `handle_credit_analysis_completed`, and more |
-| Event Catalogue | ✅ | All 13 catalogue events + 4 identified missing events |
+| `LoanApplicationAggregate` | Complete | 9-state machine, application-level replay via `load()`, loan-stream version preserved for OCC |
+| `AgentSessionAggregate` | Complete | Gas Town enforcement and model-version tracking |
+| `ComplianceRecordAggregate` | Complete | Separate compliance stream replay, required/passed check tracking, clearance state |
+| Business Rule 1 | Complete | Valid state transitions enforced via `VALID_TRANSITIONS` |
+| Business Rule 2 | Complete | `assert_context_loaded()` prevents decisions before `AgentContextLoaded` |
+| Business Rule 3 | Complete | Single credit-analysis completion enforced per application with validation plus application-scoped advisory lock |
+| Business Rule 4 | Complete | `confidence_score < 0.6` forces `REFER` |
+| Business Rule 5 | Complete | Approval checks `ComplianceRecord` stream and requires `ComplianceClearanceIssued` |
+| Business Rule 6 | Complete | `DecisionGenerated` rejects contributing sessions that never processed the application |
+| Command handlers | Complete | `handle_submit_application`, `handle_start_agent_session`, `handle_credit_analysis_completed`, `handle_generate_decision`, `handle_application_approved` |
+| Event catalogue | Complete for interim scope | Event models implemented from catalogue plus identified missing events |
 
 ### Test Results
 
-All 6 tests pass:
+All 9 tests pass:
 
+```text
+tests/test_concurrency.py::test_double_decision_concurrency PASSED                                           [ 11%]
+tests/test_concurrency.py::test_new_stream_creation PASSED                                                   [ 22%]
+tests/test_concurrency.py::test_stream_version_nonexistent PASSED                                            [ 33%]
+tests/test_concurrency.py::test_load_stream_empty PASSED                                                     [ 44%]
+tests/test_concurrency.py::test_metadata_contains_correlation_id PASSED                                      [ 55%]
+tests/test_concurrency.py::test_archive_stream PASSED                                                        [ 66%]
+tests/test_handlers.py::test_credit_analysis_written_to_agent_session_stream PASSED                          [ 77%]
+tests/test_handlers.py::test_generate_decision_rejects_invalid_contributing_sessions PASSED                  [ 88%]
+tests/test_handlers.py::test_application_approval_checks_compliance_record_stream PASSED                     [100%]
+
+======================== 9 passed in 4.40s ========================
 ```
-tests/test_concurrency.py::test_double_decision_concurrency    PASSED  [ 16%]
-tests/test_concurrency.py::test_new_stream_creation            PASSED  [ 33%]
-tests/test_concurrency.py::test_stream_version_nonexistent     PASSED  [ 50%]
-tests/test_concurrency.py::test_load_stream_empty              PASSED  [ 66%]
-tests/test_concurrency.py::test_metadata_contains_correlation_id PASSED [ 83%]
-tests/test_concurrency.py::test_archive_stream                 PASSED  [100%]
 
-======================== 6 passed in ~7s ========================
-```
-
-Tests use `testcontainers` to spin up a PostgreSQL 16 instance in Docker — no external database setup required.
+Tests use `testcontainers` to spin up a PostgreSQL 16 instance in Docker. The passing run above was verified locally on Windows using `uv run pytest tests/ -v`.
 
 ---
 
 ## 4. Concurrency Test Results
 
-The **Double-Decision Concurrency Test** (the MANDATORY test from Challenge Doc Phase 1 p.8) passes with all 3 required assertions:
+The **Double-Decision Concurrency Test** (the mandatory Phase 1 test from the challenge brief) passes with all 3 required assertions:
 
-- **(a)** Total events in stream after both tasks = **4** (not 5) ✅
-- **(b)** Winning task's event has `stream_position = 4` ✅
-- **(c)** Losing task raises `OptimisticConcurrencyError` — not silently swallowed ✅
+- **(a)** Total events in stream after both tasks = **4** (not 5)
+- **(b)** Winning task's event has `stream_position = 4`
+- **(c)** Losing task raises `OptimisticConcurrencyError` and is not silently swallowed
 
 Additional assertions verified:
-- Error contains `stream_id`, `expected_version = 3`, `actual_version = 4`
-- Error includes `suggested_action = "reload_stream_and_retry"` (for LLM consumers)
-- Stream positions after test: `[1, 2, 3, 4]` — no gaps, no duplicates
 
-The test uses `anyio.create_task_group()` (not `asyncio.gather()`) as specified in the challenge doc.
+- Error contains `stream_id`, `expected_version = 3`, `actual_version = 4`
+- Error includes `suggested_action = "reload_stream_and_retry"`
+- Stream positions after test are `[1, 2, 3, 4]` with no gaps or duplicates
+
+Additional domain-regression tests now verify:
+
+- `CreditAnalysisCompleted` is appended to the correct `AgentSession` stream while still updating application state through replay
+- `DecisionGenerated` rejects invalid contributing session IDs that never processed the application
+- `ApplicationApproved` validates against the `ComplianceRecord` stream rather than assuming compliance facts are in the loan stream
 
 ---
 
 ## 5. Known Gaps & Plan for Final Submission
 
-### Phase 3 — Projections & Async Daemon (Not Started)
+### Phase 3 - Projections & Async Daemon (Not Started)
 
 | Deliverable | Plan |
 |-------------|------|
 | `src/projections/daemon.py` | `ProjectionDaemon` with fault-tolerant batch processing, per-projection checkpoints, `get_lag()` |
 | `src/projections/application_summary.py` | One row per application, upsert-based, SLO < 500ms lag |
 | `src/projections/agent_performance.py` | Metrics per agent model version (rate, duration, confidence) |
-| `src/projections/compliance_audit.py` | Temporal query support with `get_compliance_at(app_id, timestamp)`, snapshot strategy |
-| `tests/test_projections.py` | Lag SLO tests under simulated load of 50 concurrent handlers |
+| `src/projections/compliance_audit.py` | Temporal query support with `get_compliance_at(app_id, timestamp)` |
+| `tests/test_projections.py` | Projection and lag tests under concurrent load |
 
-### Phase 4 — Upcasting, Integrity & Gas Town (Not Started)
+### Phase 4 - Upcasting, Integrity & Gas Town (Not Started)
 
 | Deliverable | Plan |
 |-------------|------|
-| `src/upcasting/registry.py` | `UpcasterRegistry` with automatic version chain on load |
-| `src/upcasting/upcasters.py` | `CreditAnalysisCompleted` v1→v2, `DecisionGenerated` v1→v2 |
+| `src/upcasting/registry.py` | `UpcasterRegistry` with automatic version-chain application on load |
+| `src/upcasting/upcasters.py` | `CreditAnalysisCompleted` and `DecisionGenerated` version migrations |
 | `src/integrity/audit_chain.py` | SHA-256 hash chain, tamper detection |
 | `src/integrity/gas_town.py` | `reconstruct_agent_context()` with token budget |
-| `tests/test_upcasting.py` | Immutability test (stored payload unchanged after upcast) |
-| `tests/test_gas_town.py` | Simulated crash recovery test |
+| `tests/test_upcasting.py` | Immutability and version-chain tests |
+| `tests/test_gas_town.py` | Simulated crash-recovery test |
 
-### Phase 5 — MCP Server (Not Started)
+### Phase 5 - MCP Server (Not Started)
 
 | Deliverable | Plan |
 |-------------|------|
 | `src/mcp/server.py` | MCP server entry point |
-| `src/mcp/tools.py` | 8 tools (command side) with structured error types |
-| `src/mcp/resources.py` | 6 resources (query side) reading from projections |
-| `tests/test_mcp_lifecycle.py` | Full loan lifecycle via MCP tools only |
+| `src/mcp/tools.py` | 8 command-side tools with structured errors |
+| `src/mcp/resources.py` | 6 query-side resources reading from projections |
+| `tests/test_mcp_lifecycle.py` | End-to-end lifecycle through MCP only |
 
-### Phase 6 — Bonus (If Time Permits)
+### Phase 6 - Bonus (If Time Permits)
 
 | Deliverable | Plan |
 |-------------|------|
@@ -288,12 +300,12 @@ The test uses `anyio.create_task_group()` (not `asyncio.gather()`) as specified 
 
 ### DESIGN.md (Required for Final)
 
-Will contain 6 required sections: aggregate boundary justification, projection strategy, concurrency analysis, upcasting inference decisions, EventStoreDB comparison, and "what you would do differently."
+Will contain the 6 required sections: aggregate boundary justification, projection strategy, concurrency analysis, upcasting inference decisions, EventStoreDB comparison, and "what you would do differently."
 
 ### Priority Order for Final Submission
 
-1. **Phase 3** (Projections) — highest rubric weight remaining
-2. **Phase 4** (Upcasting + Integrity) — demonstrates immutability understanding
-3. **Phase 5** (MCP Server) — completes the interface layer
-4. **DESIGN.md** — assessed with equal weight to code
-5. **Phase 6** (Bonus) — only if Phases 3–5 are solid
+1. **Phase 3** - Projections
+2. **Phase 4** - Upcasting + Integrity
+3. **Phase 5** - MCP Server
+4. **DESIGN.md**
+5. **Phase 6** - Bonus, only if Phases 3-5 are solid
