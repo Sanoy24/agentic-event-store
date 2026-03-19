@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -23,6 +24,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.aggregates.agent_session import AgentSessionAggregate
+from src.aggregates.compliance_record import ComplianceRecordAggregate
 from src.aggregates.loan_application import (
     ApplicationState,
     LoanApplicationAggregate,
@@ -33,7 +35,6 @@ from src.models.events import (
     ApplicationApproved,
     ApplicationSubmitted,
     CreditAnalysisCompleted,
-    CreditAnalysisRequested,
     DecisionGenerated,
     DomainError,
     LoanPurpose,
@@ -136,6 +137,44 @@ def hash_inputs(input_data: dict) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+@asynccontextmanager
+async def application_lock(store: EventStore, application_id: str):
+    """
+    Serialize application-scoped commands that would otherwise write to
+    different streams and bypass optimistic concurrency on the loan stream.
+    """
+    async with store._pool.connection() as conn:  # noqa: SLF001 - narrow internal use
+        await conn.execute(
+            "SELECT pg_advisory_lock(hashtext(%s))",
+            (f"loan-{application_id}",),
+        )
+        try:
+            yield
+        finally:
+            await conn.execute(
+                "SELECT pg_advisory_unlock(hashtext(%s))",
+                (f"loan-{application_id}",),
+            )
+
+
+async def session_contains_application_decision(
+    store: EventStore,
+    session_stream_id: str,
+    application_id: str,
+) -> bool:
+    """
+    Verify a contributing AgentSession stream contains at least one decision
+    event for the target application.
+    """
+    events = await store.load_stream(session_stream_id)
+    for event in events:
+        if event.payload.get("application_id") != application_id:
+            continue
+        if event.event_type in {"CreditAnalysisCompleted", "FraudScreeningCompleted"}:
+            return True
+    return False
+
+
 # =============================================================================
 # Command Handlers
 # =============================================================================
@@ -219,46 +258,46 @@ async def handle_credit_analysis_completed(
     )
     structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
 
-    # 1. Reconstruct current aggregate state from event history
-    app = await LoanApplicationAggregate.load(store, cmd.application_id)
-    agent = await AgentSessionAggregate.load(store, cmd.agent_id, cmd.session_id)
+    async with application_lock(store, cmd.application_id):
+        # 1. Reconstruct current aggregate state from event history
+        app = await LoanApplicationAggregate.load(store, cmd.application_id)
+        agent = await AgentSessionAggregate.load(store, cmd.agent_id, cmd.session_id)
 
-    # 2. Validate — all business rules checked BEFORE any state change
-    app.assert_awaiting_credit_analysis()
-    agent.assert_context_loaded()                     # Gas Town pattern
-    agent.assert_model_version_current(cmd.model_version)
-    app.assert_credit_analysis_not_done()             # Rule 3: model version locking
+        # 2. Validate — all business rules checked BEFORE any state change
+        app.assert_awaiting_credit_analysis()
+        agent.assert_context_loaded()                     # Gas Town pattern
+        agent.assert_model_version_current(cmd.model_version)
+        app.assert_credit_analysis_not_done()             # Rule 3: model version locking
 
-    # 3. Determine new events — pure logic, no I/O
-    # Rule 4: enforce confidence floor
-    LoanApplicationAggregate.enforce_confidence_floor(
-        cmd.confidence_score, cmd.risk_tier
-    )
+        # 3. Determine new events — pure logic, no I/O
+        LoanApplicationAggregate.enforce_confidence_floor(
+            cmd.confidence_score, cmd.risk_tier
+        )
 
-    new_events = [
-        CreditAnalysisCompleted(
-            application_id=cmd.application_id,
-            agent_id=cmd.agent_id,
-            session_id=cmd.session_id,
-            model_version=cmd.model_version,
-            model_deployment_id=cmd.model_deployment_id,
-            confidence_score=cmd.confidence_score,
-            risk_tier=cmd.risk_tier,
-            recommended_limit_usd=cmd.recommended_limit_usd,
-            analysis_duration_ms=cmd.duration_ms,
-            input_data_hash=hash_inputs(cmd.input_data),
-            regulatory_basis=cmd.regulatory_basis,
-        ),
-    ]
+        new_events = [
+            CreditAnalysisCompleted(
+                application_id=cmd.application_id,
+                agent_id=cmd.agent_id,
+                session_id=cmd.session_id,
+                model_version=cmd.model_version,
+                model_deployment_id=cmd.model_deployment_id,
+                confidence_score=cmd.confidence_score,
+                risk_tier=cmd.risk_tier,
+                recommended_limit_usd=cmd.recommended_limit_usd,
+                analysis_duration_ms=cmd.duration_ms,
+                input_data_hash=hash_inputs(cmd.input_data),
+                regulatory_basis=cmd.regulatory_basis,
+            ),
+        ]
 
-    # 4. Append atomically — optimistic concurrency enforced by store
-    await store.append(
-        stream_id=f"loan-{cmd.application_id}",
-        events=new_events,
-        expected_version=app.version,
-        correlation_id=cmd.correlation_id,
-        causation_id=cmd.causation_id,
-    )
+        # 4. Append to the AgentSession stream.
+        await store.append(
+            stream_id=f"agent-{cmd.agent_id}-{cmd.session_id}",
+            events=new_events,
+            expected_version=agent.version,
+            correlation_id=cmd.correlation_id,
+            causation_id=cmd.causation_id,
+        )
 
     log.info(
         "credit_analysis_completed",
@@ -347,8 +386,17 @@ async def handle_generate_decision(
         )
 
     # Rule 6: assert contributing sessions valid
+    valid_session_ids = set()
+    for session_stream_id in cmd.contributing_agent_sessions:
+        if await session_contains_application_decision(
+            store, session_stream_id, cmd.application_id
+        ):
+            valid_session_ids.add(session_stream_id)
+
     app.assert_contributing_sessions_valid(
-        cmd.contributing_agent_sessions, cmd.application_id
+        cmd.contributing_agent_sessions,
+        cmd.application_id,
+        valid_session_ids,
     )
 
     # Rule 4: enforce confidence floor
@@ -405,6 +453,7 @@ async def handle_application_approved(
 
     # 1. Reconstruct aggregate state
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
+    compliance = await ComplianceRecordAggregate.load(store, cmd.application_id)
 
     # 2. Validate
     if app.state != ApplicationState.APPROVED_PENDING_HUMAN:
@@ -414,7 +463,11 @@ async def handle_application_approved(
         )
 
     # Rule 5: compliance must be complete
-    app.assert_compliance_complete()
+    app.assert_compliance_complete(
+        required_checks=compliance.required_checks,
+        passed_checks=compliance.passed_checks,
+        clearance_issued=compliance.clearance_issued,
+    )
 
     # 3. Determine new events
     now = datetime.now(timezone.utc)
