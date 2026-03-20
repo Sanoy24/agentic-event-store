@@ -42,6 +42,7 @@ type ModelVersion = str
 # PART A — Base Classes
 # =============================================================================
 
+
 class BaseEvent(BaseModel):
     """
     Base class for all domain events.
@@ -55,6 +56,7 @@ class BaseEvent(BaseModel):
       your most-changed event type?" without instantiation.
       (Manual p.17 — Schema Immortality Awareness self-diagnosis)
     """
+
     model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     event_type: ClassVar[str]
@@ -69,6 +71,7 @@ class StoredEvent(BaseModel):
     field because the stored version may differ from the current class version
     (before upcasting is applied).
     """
+
     model_config = ConfigDict(frozen=True)
 
     event_id: UUID
@@ -90,11 +93,14 @@ class StoredEvent(BaseModel):
         raw stored event → upcast v1→v2 → upcast v2→v3 → final event
         The raw stored payload in the database is NEVER modified.
         """
-        return self.model_copy(update={"payload": new_payload, "event_version": version})
+        return self.model_copy(
+            update={"payload": new_payload, "event_version": version}
+        )
 
 
 class StreamMetadata(BaseModel):
     """Metadata about an event stream, read from event_streams table."""
+
     model_config = ConfigDict(frozen=True)
 
     stream_id: str
@@ -108,6 +114,7 @@ class StreamMetadata(BaseModel):
 # =============================================================================
 # PART B — Custom Exceptions
 # =============================================================================
+
 
 class OptimisticConcurrencyError(Exception):
     """
@@ -143,6 +150,7 @@ class DomainError(Exception):
     rule — it is a UI validation.
     (Challenge Doc Phase 2 p.9)
     """
+
     pass
 
 
@@ -183,8 +191,10 @@ class StreamArchivedError(DomainError):
 
 # --- Enums for constrained fields ---
 
+
 class LoanPurpose(StrEnum):
     """Loan purpose categories for Apex Financial Services."""
+
     WORKING_CAPITAL = "WORKING_CAPITAL"
     EQUIPMENT = "EQUIPMENT"
     REAL_ESTATE = "REAL_ESTATE"
@@ -195,6 +205,7 @@ class LoanPurpose(StrEnum):
 
 class RiskTier(StrEnum):
     """Risk classification tiers from credit analysis."""
+
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
@@ -203,6 +214,7 @@ class RiskTier(StrEnum):
 
 class Recommendation(StrEnum):
     """Decision recommendation values."""
+
     APPROVE = "APPROVE"
     DECLINE = "DECLINE"
     REFER = "REFER"
@@ -210,18 +222,22 @@ class Recommendation(StrEnum):
 
 # --- LoanApplication Events ---
 
+
 class ApplicationSubmitted(BaseEvent):
     """
     First event in a LoanApplication stream. Records the fact that a
     commercial loan application was submitted to the platform.
     (LoanApplication aggregate, v1)
     """
+
     event_type: ClassVar[str] = "ApplicationSubmitted"
     event_version: ClassVar[int] = 1
 
     application_id: str
     applicant_id: str
-    applicant_name: str  # Denormalised from applicant record (Manual Pattern 1, line 665)
+    applicant_name: (
+        str  # Denormalised from applicant record (Manual Pattern 1, line 665)
+    )
     requested_amount_usd: Decimal = Field(gt=0)
     loan_purpose: LoanPurpose
     submission_channel: str  # "web" | "mobile" | "agent" | "branch"
@@ -234,6 +250,7 @@ class CreditAnalysisRequested(BaseEvent):
     Triggers assignment of a CreditAnalysis agent.
     (LoanApplication aggregate, v1)
     """
+
     event_type: ClassVar[str] = "CreditAnalysisRequested"
     event_version: ClassVar[int] = 1
 
@@ -250,6 +267,7 @@ class CreditAnalysisCompleted(BaseEvent):
     for full causal provenance. (Manual Pattern 2, p.22)
     (AgentSession aggregate, v2)
     """
+
     event_type: ClassVar[str] = "CreditAnalysisCompleted"
     event_version: ClassVar[int] = 2
 
@@ -263,7 +281,9 @@ class CreditAnalysisCompleted(BaseEvent):
     recommended_limit_usd: Decimal = Field(gt=0)
     analysis_duration_ms: int = Field(ge=0)
     input_data_hash: str  # SHA-256 of all input data — not the data itself
-    regulatory_basis: list[str] = []  # Regulation IDs this analysis satisfies (Manual Pattern 2)
+    regulatory_basis: list[
+        str
+    ] = []  # Regulation IDs this analysis satisfies (Manual Pattern 2)
 
 
 class DecisionGenerated(BaseEvent):
@@ -275,6 +295,7 @@ class DecisionGenerated(BaseEvent):
     Business Rule 4: confidence_score < 0.6 forces recommendation = 'REFER'.
     This is enforced in the aggregate, not here.
     """
+
     event_type: ClassVar[str] = "DecisionGenerated"
     event_version: ClassVar[int] = 2
 
@@ -294,6 +315,7 @@ class HumanReviewCompleted(BaseEvent):
     is required.
     (LoanApplication aggregate, v1)
     """
+
     event_type: ClassVar[str] = "HumanReviewCompleted"
     event_version: ClassVar[int] = 1
 
@@ -317,6 +339,7 @@ class ApplicationApproved(BaseEvent):
     Cannot be appended unless all compliance checks have passed.
     (LoanApplication aggregate, v1)
     """
+
     event_type: ClassVar[str] = "ApplicationApproved"
     event_version: ClassVar[int] = 1
 
@@ -333,6 +356,7 @@ class ApplicationDeclined(BaseEvent):
     Records that a loan application has been declined.
     (LoanApplication aggregate, v1)
     """
+
     event_type: ClassVar[str] = "ApplicationDeclined"
     event_version: ClassVar[int] = 1
 
@@ -343,6 +367,7 @@ class ApplicationDeclined(BaseEvent):
 
 
 # --- AgentSession Events ---
+
 
 class AgentContextLoaded(BaseEvent):
     """
@@ -357,6 +382,7 @@ class AgentContextLoaded(BaseEvent):
     first event before any decision event can be appended.
     (AgentSession aggregate, v1)
     """
+
     event_type: ClassVar[str] = "AgentContextLoaded"
     event_version: ClassVar[int] = 1
 
@@ -373,6 +399,7 @@ class FraudScreeningCompleted(BaseEvent):
     Records the completion of fraud screening by a FraudDetection agent.
     (AgentSession aggregate, v1)
     """
+
     event_type: ClassVar[str] = "FraudScreeningCompleted"
     event_version: ClassVar[int] = 1
 
@@ -387,11 +414,13 @@ class FraudScreeningCompleted(BaseEvent):
 
 # --- ComplianceRecord Events ---
 
+
 class ComplianceCheckRequested(BaseEvent):
     """
     Records that compliance checks have been requested for an application.
     (ComplianceRecord aggregate, v1)
     """
+
     event_type: ClassVar[str] = "ComplianceCheckRequested"
     event_version: ClassVar[int] = 1
 
@@ -405,6 +434,7 @@ class ComplianceRulePassed(BaseEvent):
     Records that a specific compliance rule has been evaluated and passed.
     (ComplianceRecord aggregate, v1)
     """
+
     event_type: ClassVar[str] = "ComplianceRulePassed"
     event_version: ClassVar[int] = 1
 
@@ -420,6 +450,7 @@ class ComplianceRuleFailed(BaseEvent):
     Records that a specific compliance rule has been evaluated and failed.
     (ComplianceRecord aggregate, v1)
     """
+
     event_type: ClassVar[str] = "ComplianceRuleFailed"
     event_version: ClassVar[int] = 1
 
@@ -432,6 +463,7 @@ class ComplianceRuleFailed(BaseEvent):
 
 # --- AuditLedger Events ---
 
+
 class AuditIntegrityCheckRun(BaseEvent):
     """
     Records the result of a cryptographic integrity check on the audit chain.
@@ -439,6 +471,7 @@ class AuditIntegrityCheckRun(BaseEvent):
     forming a blockchain-style chain. Any post-hoc modification breaks the chain.
     (AuditLedger aggregate, v1)
     """
+
     event_type: ClassVar[str] = "AuditIntegrityCheckRun"
     event_version: ClassVar[int] = 1
 
@@ -457,6 +490,7 @@ class AuditIntegrityCheckRun(BaseEvent):
 # Justification for each is provided in DOMAIN_NOTES.md.
 # =============================================================================
 
+
 class ApplicationUnderReview(BaseEvent):
     """
     MISSING EVENT 1 — LoanApplication aggregate, v1
@@ -473,6 +507,7 @@ class ApplicationUnderReview(BaseEvent):
 
     Justified in DOMAIN_NOTES.md Section: Missing Events.
     """
+
     event_type: ClassVar[str] = "ApplicationUnderReview"
     event_version: ClassVar[int] = 1
 
@@ -497,6 +532,7 @@ class AgentDecisionSuperseded(BaseEvent):
 
     Justified in DOMAIN_NOTES.md Section: Missing Events.
     """
+
     event_type: ClassVar[str] = "AgentDecisionSuperseded"
     event_version: ClassVar[int] = 1
 
@@ -524,6 +560,7 @@ class ComplianceClearanceIssued(BaseEvent):
 
     Justified in DOMAIN_NOTES.md Section: Missing Events.
     """
+
     event_type: ClassVar[str] = "ComplianceClearanceIssued"
     event_version: ClassVar[int] = 1
 
@@ -549,6 +586,7 @@ class AuditTamperDetected(BaseEvent):
 
     Justified in DOMAIN_NOTES.md Section: Missing Events.
     """
+
     event_type: ClassVar[str] = "AuditTamperDetected"
     event_version: ClassVar[int] = 1
 
