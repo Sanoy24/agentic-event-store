@@ -11,10 +11,12 @@ from src.commands.handlers import (
     ApproveApplicationCommand,
     CreditAnalysisCompletedCommand,
     GenerateDecisionCommand,
+    RunIntegrityCheckCommand,
     StartAgentSessionCommand,
     handle_application_approved,
     handle_credit_analysis_completed,
     handle_generate_decision,
+    handle_run_integrity_check,
     handle_start_agent_session,
 )
 from src.event_store import EventStore
@@ -303,3 +305,56 @@ async def test_application_approval_checks_compliance_record_stream(
             ),
             event_store,
         )
+
+
+@pytest.mark.asyncio
+async def test_audit_integrity_check_creates_hash_chain(
+    event_store: EventStore,
+) -> None:
+    """
+    Verify that running two integrity checks creates a linked hash chain
+    where the second check's previous_hash matches the first check's
+    integrity_hash.
+    """
+    application_id = str(uuid.uuid4())
+    await seed_application_awaiting_analysis(event_store, application_id)
+
+    # Run first integrity check
+    await handle_run_integrity_check(
+        RunIntegrityCheckCommand(
+            entity_type="loan",
+            entity_id=application_id,
+            correlation_id="corr-audit-1",
+        ),
+        event_store,
+    )
+
+    # Run second integrity check
+    await handle_run_integrity_check(
+        RunIntegrityCheckCommand(
+            entity_type="loan",
+            entity_id=application_id,
+            correlation_id="corr-audit-2",
+        ),
+        event_store,
+    )
+
+    # Verify audit stream
+    audit_events = await event_store.load_stream(f"audit-loan-{application_id}")
+    assert len(audit_events) == 2
+
+    first_check = audit_events[0]
+    second_check = audit_events[1]
+
+    assert first_check.event_type == "AuditIntegrityCheckRun"
+    assert second_check.event_type == "AuditIntegrityCheckRun"
+
+    # First check has "genesis" as previous_hash (no prior check)
+    assert first_check.payload["previous_hash"] == "genesis"
+
+    # Second check's previous_hash links to first check's integrity_hash
+    assert second_check.payload["previous_hash"] == first_check.payload["integrity_hash"]
+
+    # Both verified the same number of events in the loan stream
+    assert first_check.payload["events_verified_count"] == 2
+    assert second_check.payload["events_verified_count"] == 2
