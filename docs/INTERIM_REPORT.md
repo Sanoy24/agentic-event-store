@@ -206,31 +206,33 @@ sequenceDiagram
 | `LoanApplicationAggregate` | Complete | 9-state machine, application-level replay via `load()`, loan-stream version preserved for OCC |
 | `AgentSessionAggregate` | Complete | Gas Town enforcement and model-version tracking |
 | `ComplianceRecordAggregate` | Complete | Separate compliance stream replay, required/passed check tracking, clearance state |
+| `AuditLedgerAggregate` | Complete | Cryptographic hash chain, tamper detection, chain integrity assertion |
 | Business Rule 1 | Complete | Valid state transitions enforced via `VALID_TRANSITIONS` |
 | Business Rule 2 | Complete | `assert_context_loaded()` prevents decisions before `AgentContextLoaded` |
 | Business Rule 3 | Complete | Single credit-analysis completion enforced per application with validation plus application-scoped advisory lock |
 | Business Rule 4 | Complete | `confidence_score < 0.6` forces `REFER` |
 | Business Rule 5 | Complete | Approval checks `ComplianceRecord` stream and requires `ComplianceClearanceIssued` |
 | Business Rule 6 | Complete | `DecisionGenerated` rejects contributing sessions that never processed the application |
-| Command handlers | Complete | `handle_submit_application`, `handle_start_agent_session`, `handle_credit_analysis_completed`, `handle_generate_decision`, `handle_application_approved` |
+| Command handlers | Complete | `handle_submit_application`, `handle_start_agent_session`, `handle_credit_analysis_completed`, `handle_generate_decision`, `handle_application_approved`, `handle_run_integrity_check` |
 | Event catalogue | Complete for interim scope | Event models implemented from catalogue plus identified missing events |
 
 ### Test Results
 
-All 9 tests pass:
+All 10 tests pass:
 
 ```text
-tests/test_concurrency.py::test_double_decision_concurrency PASSED                                           [ 11%]
-tests/test_concurrency.py::test_new_stream_creation PASSED                                                   [ 22%]
-tests/test_concurrency.py::test_stream_version_nonexistent PASSED                                            [ 33%]
-tests/test_concurrency.py::test_load_stream_empty PASSED                                                     [ 44%]
-tests/test_concurrency.py::test_metadata_contains_correlation_id PASSED                                      [ 55%]
-tests/test_concurrency.py::test_archive_stream PASSED                                                        [ 66%]
-tests/test_handlers.py::test_credit_analysis_written_to_agent_session_stream PASSED                          [ 77%]
-tests/test_handlers.py::test_generate_decision_rejects_invalid_contributing_sessions PASSED                  [ 88%]
-tests/test_handlers.py::test_application_approval_checks_compliance_record_stream PASSED                     [100%]
+tests/test_concurrency.py::test_double_decision_concurrency PASSED                                           [ 10%]
+tests/test_concurrency.py::test_new_stream_creation PASSED                                                   [ 20%]
+tests/test_concurrency.py::test_stream_version_nonexistent PASSED                                            [ 30%]
+tests/test_concurrency.py::test_load_stream_empty PASSED                                                     [ 40%]
+tests/test_concurrency.py::test_metadata_contains_correlation_id PASSED                                      [ 50%]
+tests/test_concurrency.py::test_archive_stream PASSED                                                        [ 60%]
+tests/test_handlers.py::test_credit_analysis_written_to_agent_session_stream PASSED                          [ 70%]
+tests/test_handlers.py::test_generate_decision_rejects_invalid_contributing_sessions PASSED                  [ 80%]
+tests/test_handlers.py::test_application_approval_checks_compliance_record_stream PASSED                     [ 90%]
+tests/test_handlers.py::test_audit_integrity_check_creates_hash_chain PASSED                                 [100%]
 
-======================== 9 passed in 4.40s ========================
+======================== 10 passed ========================
 ```
 
 Tests use `testcontainers` to spin up a PostgreSQL 16 instance in Docker. The passing run above was verified locally on Windows using `uv run pytest tests/ -v`.
