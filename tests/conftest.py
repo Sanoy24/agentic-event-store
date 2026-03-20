@@ -50,6 +50,7 @@ structlog.configure(
 # PostgreSQL Test Container (testcontainers 4.x)
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def postgres_container():
     """
@@ -90,6 +91,7 @@ def db_url(postgres_container):
 # EventStore Fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 async def event_store(db_url):
     """
@@ -102,5 +104,7 @@ async def event_store(db_url):
 
         # Truncate tables between tests for isolation
         async with pool.connection() as conn:
-            await conn.execute("TRUNCATE events, event_streams, projection_checkpoints, outbox CASCADE")
+            await conn.execute(
+                "TRUNCATE events, event_streams, projection_checkpoints, outbox CASCADE"
+            )
             await conn.commit()
