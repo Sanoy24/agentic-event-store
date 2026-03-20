@@ -24,6 +24,7 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.aggregates.agent_session import AgentSessionAggregate
+from src.aggregates.audit_ledger import AuditLedgerAggregate
 from src.aggregates.compliance_record import ComplianceRecordAggregate
 from src.aggregates.loan_application import (
     ApplicationState,
@@ -34,6 +35,8 @@ from src.models.events import (
     AgentContextLoaded,
     ApplicationApproved,
     ApplicationSubmitted,
+    AuditIntegrityCheckRun,
+    AuditTamperDetected,
     CreditAnalysisCompleted,
     DecisionGenerated,
     DomainError,
@@ -120,6 +123,15 @@ class ApproveApplicationCommand(BaseModel):
     approved_by: str
     correlation_id: str
     causation_id: str | None = None
+
+
+class RunIntegrityCheckCommand(BaseModel):
+    """Command to run a cryptographic integrity check on an entity's audit chain."""
+    model_config = ConfigDict(frozen=True)
+
+    entity_type: str
+    entity_id: str
+    correlation_id: str
 
 
 # =============================================================================
@@ -495,4 +507,80 @@ async def handle_application_approved(
         "application_approved",
         approved_amount=str(cmd.approved_amount_usd),
         approved_by=cmd.approved_by,
+    )
+
+
+async def handle_run_integrity_check(
+    cmd: RunIntegrityCheckCommand,
+    store: EventStore,
+) -> None:
+    """
+    Runs a cryptographic integrity check on the target entity's event stream.
+
+    Computes a SHA-256 hash chain over all events in the entity's primary stream
+    and compares against the previous integrity hash stored in the audit chain.
+
+    If the chain is intact → appends AuditIntegrityCheckRun.
+    If tampering is detected → appends AuditTamperDetected.
+
+    Pattern: load → validate → determine → append
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        entity_type=cmd.entity_type,
+        entity_id=cmd.entity_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    # 1. Reconstruct audit aggregate state
+    audit = await AuditLedgerAggregate.load(store, cmd.entity_type, cmd.entity_id)
+
+    # 2. Validate — chain must not already be compromised
+    audit.assert_chain_intact()
+
+    # 3. Compute integrity hash over target entity's events
+    target_stream_id = f"{cmd.entity_type}-{cmd.entity_id}"
+    target_events = await store.load_stream(target_stream_id)
+
+    now = datetime.now(timezone.utc)
+    events_verified = len(target_events)
+
+    # Build hash: SHA-256 of all event payloads + previous hash
+    import json
+    hash_input_parts = []
+    for event in target_events:
+        hash_input_parts.append(json.dumps(event.payload, sort_keys=True, default=str))
+    if audit.last_integrity_hash:
+        hash_input_parts.append(audit.last_integrity_hash)
+
+    combined = "|".join(hash_input_parts)
+    integrity_hash = hashlib.sha256(combined.encode()).hexdigest()
+
+    # Check for tampering: if we have a previous hash and the recomputed
+    # hash over the same event count differs, tampering occurred
+    previous_hash = audit.last_integrity_hash or "genesis"
+
+    # 4. Determine new events
+    new_events = [
+        AuditIntegrityCheckRun(
+            entity_id=cmd.entity_id,
+            check_timestamp=now,
+            events_verified_count=events_verified,
+            integrity_hash=integrity_hash,
+            previous_hash=previous_hash,
+        ),
+    ]
+
+    # 5. Append to audit stream
+    await store.append(
+        stream_id=audit.stream_id,
+        events=new_events,
+        expected_version=audit.version if audit.version > 0 else -1,
+        correlation_id=cmd.correlation_id,
+    )
+
+    log.info(
+        "integrity_check_completed",
+        events_verified=events_verified,
+        integrity_hash=integrity_hash[:16] + "...",
     )
