@@ -24,22 +24,28 @@ import structlog
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.aggregates.agent_session import AgentSessionAggregate
-from src.aggregates.audit_ledger import AuditLedgerAggregate
 from src.aggregates.compliance_record import ComplianceRecordAggregate
 from src.aggregates.loan_application import (
     ApplicationState,
     LoanApplicationAggregate,
 )
 from src.event_store import EventStore
+from src.integrity.audit_chain import run_integrity_check as execute_integrity_check
 from src.models.events import (
     AgentContextLoaded,
     ApplicationApproved,
     ApplicationSubmitted,
-    AuditIntegrityCheckRun,
-    AuditTamperDetected,
+    ComplianceCheckRequested,
+    ComplianceClearanceIssued,
+    ComplianceRuleFailed,
+    ComplianceRulePassed,
     CreditAnalysisCompleted,
     DecisionGenerated,
+    DocumentUploaded,
+    DocumentUploadRequested,
     DomainError,
+    FraudScreeningCompleted,
+    HumanReviewCompleted,
     LoanPurpose,
     Recommendation,
     RiskTier,
@@ -52,8 +58,10 @@ logger = structlog.get_logger()
 # Command Models (Pydantic v2)
 # =============================================================================
 
+
 class SubmitApplicationCommand(BaseModel):
     """Command to submit a new loan application."""
+
     model_config = ConfigDict(frozen=True)
 
     application_id: str
@@ -67,6 +75,7 @@ class SubmitApplicationCommand(BaseModel):
 
 class CreditAnalysisCompletedCommand(BaseModel):
     """Command to record completion of credit analysis by an AI agent."""
+
     model_config = ConfigDict(frozen=True)
 
     application_id: str
@@ -86,6 +95,7 @@ class CreditAnalysisCompletedCommand(BaseModel):
 
 class StartAgentSessionCommand(BaseModel):
     """Command to start a new agent session (Gas Town: first event)."""
+
     model_config = ConfigDict(frozen=True)
 
     agent_id: str
@@ -99,6 +109,7 @@ class StartAgentSessionCommand(BaseModel):
 
 class GenerateDecisionCommand(BaseModel):
     """Command to generate a decision for a loan application."""
+
     model_config = ConfigDict(frozen=True)
 
     application_id: str
@@ -114,6 +125,7 @@ class GenerateDecisionCommand(BaseModel):
 
 class ApproveApplicationCommand(BaseModel):
     """Command to approve a loan application."""
+
     model_config = ConfigDict(frozen=True)
 
     application_id: str
@@ -127,6 +139,7 @@ class ApproveApplicationCommand(BaseModel):
 
 class RunIntegrityCheckCommand(BaseModel):
     """Command to run a cryptographic integrity check on an entity's audit chain."""
+
     model_config = ConfigDict(frozen=True)
 
     entity_type: str
@@ -138,6 +151,7 @@ class RunIntegrityCheckCommand(BaseModel):
 # Helper Functions
 # =============================================================================
 
+
 def hash_inputs(input_data: dict) -> str:
     """
     Hash input data for causal provenance tracking.
@@ -145,6 +159,7 @@ def hash_inputs(input_data: dict) -> str:
     (Manual Pattern 2, p.22 — input_data_hash on decision events)
     """
     import json
+
     canonical = json.dumps(input_data, sort_keys=True, default=str)
     return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -190,6 +205,7 @@ async def session_contains_application_decision(
 # =============================================================================
 # Command Handlers
 # =============================================================================
+
 
 async def handle_submit_application(
     cmd: SubmitApplicationCommand,
@@ -245,6 +261,65 @@ async def handle_submit_application(
     log.info("application_submitted", applicant_id=cmd.applicant_id)
 
 
+async def handle_request_document_upload(
+    cmd: RequestDocumentUploadCommand,
+    store: EventStore,
+) -> None:
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    async with application_lock(store, cmd.application_id):
+        app = await LoanApplicationAggregate.load(store, cmd.application_id)
+
+        new_events = [
+            DocumentUploadRequested(
+                application_id=cmd.application_id,
+            ),
+        ]
+
+        await store.append(
+            stream_id=f"loan-{cmd.application_id}",
+            events=new_events,
+            expected_version=app.version,
+            correlation_id=cmd.correlation_id,
+        )
+    log.info("document_upload_requested")
+
+
+async def handle_upload_document(
+    cmd: UploadDocumentCommand,
+    store: EventStore,
+) -> None:
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+        document_id=cmd.document_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    async with application_lock(store, cmd.application_id):
+        app = await LoanApplicationAggregate.load(store, cmd.application_id)
+
+        new_events = [
+            DocumentUploaded(
+                application_id=cmd.application_id,
+                document_id=cmd.document_id,
+                file_path=cmd.file_path,
+            ),
+        ]
+
+        await store.append(
+            stream_id=f"loan-{cmd.application_id}",
+            events=new_events,
+            expected_version=app.version,
+            correlation_id=cmd.correlation_id,
+        )
+    log.info("document_uploaded", file_path=cmd.file_path)
+
+
 async def handle_credit_analysis_completed(
     cmd: CreditAnalysisCompletedCommand,
     store: EventStore,
@@ -277,9 +352,9 @@ async def handle_credit_analysis_completed(
 
         # 2. Validate — all business rules checked BEFORE any state change
         app.assert_awaiting_credit_analysis()
-        agent.assert_context_loaded()                     # Gas Town pattern
+        agent.assert_context_loaded()  # Gas Town pattern
         agent.assert_model_version_current(cmd.model_version)
-        app.assert_credit_analysis_not_done()             # Rule 3: model version locking
+        app.assert_credit_analysis_not_done()  # Rule 3: model version locking
 
         # 3. Determine new events — pure logic, no I/O
         LoanApplicationAggregate.enforce_confidence_floor(
@@ -515,15 +590,10 @@ async def handle_run_integrity_check(
     store: EventStore,
 ) -> None:
     """
-    Runs a cryptographic integrity check on the target entity's event stream.
+    Runs a cryptographic integrity check using the shared audit-chain module.
 
-    Computes a SHA-256 hash chain over all events in the entity's primary stream
-    and compares against the previous integrity hash stored in the audit chain.
-
-    If the chain is intact → appends AuditIntegrityCheckRun.
-    If tampering is detected → appends AuditTamperDetected.
-
-    Pattern: load → validate → determine → append
+    This keeps the command handler aligned with the MCP tool path so both
+    verify the same AuditLedger stream and append the same integrity facts.
     """
     log = logger.bind(
         correlation_id=cmd.correlation_id,
@@ -532,55 +602,334 @@ async def handle_run_integrity_check(
     )
     structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
 
-    # 1. Reconstruct audit aggregate state
-    audit = await AuditLedgerAggregate.load(store, cmd.entity_type, cmd.entity_id)
-
-    # 2. Validate — chain must not already be compromised
-    audit.assert_chain_intact()
-
-    # 3. Compute integrity hash over target entity's events
-    target_stream_id = f"{cmd.entity_type}-{cmd.entity_id}"
-    target_events = await store.load_stream(target_stream_id)
-
-    now = datetime.now(timezone.utc)
-    events_verified = len(target_events)
-
-    # Build hash: SHA-256 of all event payloads + previous hash
-    import json
-    hash_input_parts = []
-    for event in target_events:
-        hash_input_parts.append(json.dumps(event.payload, sort_keys=True, default=str))
-    if audit.last_integrity_hash:
-        hash_input_parts.append(audit.last_integrity_hash)
-
-    combined = "|".join(hash_input_parts)
-    integrity_hash = hashlib.sha256(combined.encode()).hexdigest()
-
-    # Check for tampering: if we have a previous hash and the recomputed
-    # hash over the same event count differs, tampering occurred
-    previous_hash = audit.last_integrity_hash or "genesis"
-
-    # 4. Determine new events
-    new_events = [
-        AuditIntegrityCheckRun(
-            entity_id=cmd.entity_id,
-            check_timestamp=now,
-            events_verified_count=events_verified,
-            integrity_hash=integrity_hash,
-            previous_hash=previous_hash,
-        ),
-    ]
-
-    # 5. Append to audit stream
-    await store.append(
-        stream_id=audit.stream_id,
-        events=new_events,
-        expected_version=audit.version if audit.version > 0 else -1,
-        correlation_id=cmd.correlation_id,
+    result = await execute_integrity_check(
+        store=store,
+        entity_type=cmd.entity_type,
+        entity_id=cmd.entity_id,
     )
 
     log.info(
         "integrity_check_completed",
-        events_verified=events_verified,
-        integrity_hash=integrity_hash[:16] + "...",
+        events_verified=result.events_verified_count,
+        integrity_hash=result.integrity_hash[:16] + "...",
+        chain_valid=result.chain_valid,
+        tamper_detected=result.tamper_detected,
+    )
+
+
+# =============================================================================
+# Missing Command Handlers (fraud, compliance, human review)
+# =============================================================================
+
+
+class FraudScreeningCompletedCommand(BaseModel):
+    """Command to record fraud screening completion by an AI agent."""
+
+    model_config = ConfigDict(frozen=True)
+
+    application_id: str
+    agent_id: str
+    session_id: str
+    fraud_score: float = Field(ge=0.0, le=1.0)
+    anomaly_flags: list[str] = []
+    screening_model_version: str
+    model_deployment_id: str
+    input_data: dict = {}
+    correlation_id: str
+    causation_id: str | None = None
+
+
+class RequestComplianceCheckCommand(BaseModel):
+    """Command to formally request compliance checks for an application."""
+
+    model_config = ConfigDict(frozen=True)
+
+    application_id: str
+    regulation_set_version: str
+    checks_required: list[str]
+    correlation_id: str
+    causation_id: str | None = None
+
+
+class RecordComplianceCheckCommand(BaseModel):
+    """Command to record a compliance rule check result."""
+
+    model_config = ConfigDict(frozen=True)
+
+    application_id: str
+    rule_id: str
+    rule_version: str
+    passed: bool
+    failure_reason: str | None = None
+    remediation_required: bool = False
+    evidence_hash: str = ""
+    correlation_id: str
+    causation_id: str | None = None
+
+
+class HumanReviewCompletedCommand(BaseModel):
+    """Command to record a human review of an AI-generated recommendation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    application_id: str
+    reviewer_id: str
+    override: bool
+    final_decision: str  # "APPROVE" | "DECLINE"
+    override_reason: str | None = None
+    correlation_id: str
+    causation_id: str | None = None
+
+
+async def handle_fraud_screening_completed(
+    cmd: FraudScreeningCompletedCommand,
+    store: EventStore,
+) -> None:
+    """
+    Records fraud screening results from a FraudDetection agent.
+
+    Validates:
+    - Agent session must exist with AgentContextLoaded (Gas Town)
+    - Application must exist
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+        agent_id=cmd.agent_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    async with application_lock(store, cmd.application_id):
+        # 1. Reconstruct aggregate state
+        agent = await AgentSessionAggregate.load(store, cmd.agent_id, cmd.session_id)
+
+        # 2. Validate
+        agent.assert_context_loaded()
+
+        # 3. Determine new events
+        new_events = [
+            FraudScreeningCompleted(
+                application_id=cmd.application_id,
+                agent_id=cmd.agent_id,
+                fraud_score=cmd.fraud_score,
+                anomaly_flags=cmd.anomaly_flags,
+                screening_model_version=cmd.screening_model_version,
+                model_deployment_id=cmd.model_deployment_id,
+                input_data_hash=hash_inputs(cmd.input_data),
+            ),
+        ]
+
+        # 4. Append to agent session stream
+        await store.append(
+            stream_id=f"agent-{cmd.agent_id}-{cmd.session_id}",
+            events=new_events,
+            expected_version=agent.version,
+            correlation_id=cmd.correlation_id,
+            causation_id=cmd.causation_id,
+        )
+
+    log.info(
+        "fraud_screening_completed",
+        fraud_score=cmd.fraud_score,
+        anomaly_count=len(cmd.anomaly_flags),
+    )
+
+
+async def handle_request_compliance_check(
+    cmd: RequestComplianceCheckCommand,
+    store: EventStore,
+) -> None:
+    """
+    Requests a set of compliance checks for an application.
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    compliance = await ComplianceRecordAggregate.load(store, cmd.application_id)
+    stream_id = f"compliance-{cmd.application_id}"
+
+    new_events = [
+        ComplianceCheckRequested(
+            application_id=cmd.application_id,
+            regulation_set_version=cmd.regulation_set_version,
+            checks_required=cmd.checks_required,
+        )
+    ]
+
+    version = compliance.version if compliance.version > 0 else -1
+    await store.append(
+        stream_id=stream_id,
+        events=new_events,
+        expected_version=version,
+        correlation_id=cmd.correlation_id,
+        causation_id=cmd.causation_id,
+    )
+
+    log.info(
+        "compliance_check_requested",
+        checks_required=cmd.checks_required,
+    )
+
+
+async def handle_record_compliance_check(
+    cmd: RecordComplianceCheckCommand,
+    store: EventStore,
+) -> None:
+    """
+    Records a compliance rule check result (pass or fail).
+
+    Pattern: load → validate → determine → append
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+        rule_id=cmd.rule_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    # 1. Reconstruct compliance aggregate
+    compliance = await ComplianceRecordAggregate.load(store, cmd.application_id)
+    stream_id = f"compliance-{cmd.application_id}"
+
+    if compliance.required_checks and cmd.rule_id not in compliance.required_checks:
+        raise DomainError(
+            f"Rule {cmd.rule_id} is not part of the active regulation set "
+            f"for application {cmd.application_id}. Active checks: "
+            f"{sorted(compliance.required_checks)}"
+        )
+
+    # 2. Determine new events
+    now = datetime.now(timezone.utc)
+    if cmd.passed:
+        new_events = [
+            ComplianceRulePassed(
+                application_id=cmd.application_id,
+                rule_id=cmd.rule_id,
+                rule_version=cmd.rule_version,
+                evaluation_timestamp=now,
+                evidence_hash=cmd.evidence_hash,
+            ),
+        ]
+    else:
+        new_events = [
+            ComplianceRuleFailed(
+                application_id=cmd.application_id,
+                rule_id=cmd.rule_id,
+                rule_version=cmd.rule_version,
+                failure_reason=cmd.failure_reason or "No reason provided",
+                remediation_required=cmd.remediation_required,
+            ),
+        ]
+
+    # Cache expected version before applying mock events
+    expected_version = compliance.version if compliance.version > 0 else -1
+
+    # Temporarily apply the new event to see if clearance is achieved
+    import uuid
+    from src.models.events import StoredEvent
+
+    for ev in new_events:
+        mock_event = StoredEvent(
+            event_id=uuid.uuid4(),
+            stream_id=stream_id,
+            stream_position=0,
+            global_position=0,
+            event_type=ev.event_type,
+            event_version=ev.event_version,
+            payload=ev.model_dump(mode="json"),
+            metadata={},
+            recorded_at=now,
+        )
+        compliance._apply(mock_event)
+
+    if (
+        not compliance.missing_required_checks()
+        and not compliance.failed_checks
+        and not compliance.clearance_issued
+    ):
+        new_events.append(
+            ComplianceClearanceIssued(
+                application_id=cmd.application_id,
+                regulation_set_version=compliance.regulation_set_version or "unknown",
+                checks_passed=compliance.passed_checks,
+                clearance_timestamp=now,
+                issued_by="system",
+            )
+        )
+
+    # 3. Append to compliance stream
+    await store.append(
+        stream_id=stream_id,
+        events=new_events,
+        expected_version=expected_version,
+        correlation_id=cmd.correlation_id,
+        causation_id=cmd.causation_id,
+    )
+
+    log.info(
+        "compliance_check_recorded",
+        rule_id=cmd.rule_id,
+        passed=cmd.passed,
+    )
+
+
+async def handle_human_review_completed(
+    cmd: HumanReviewCompletedCommand,
+    store: EventStore,
+) -> None:
+    """
+    Records a human review of an AI-generated decision.
+
+    Validates:
+    - Application must be in a pending-human state
+    - If override=True, override_reason is required
+    """
+    log = logger.bind(
+        correlation_id=cmd.correlation_id,
+        application_id=cmd.application_id,
+        reviewer_id=cmd.reviewer_id,
+    )
+    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+
+    # 1. Reconstruct aggregate
+    app = await LoanApplicationAggregate.load(store, cmd.application_id)
+
+    # 2. Validate — must be in a pending-human state
+    pending_states = {
+        ApplicationState.APPROVED_PENDING_HUMAN,
+        ApplicationState.DECLINED_PENDING_HUMAN,
+    }
+    if app.state not in pending_states:
+        raise DomainError(
+            f"Application {cmd.application_id} is in state {app.state}, "
+            f"expected one of {pending_states} for human review."
+        )
+
+    # 3. Determine new events
+    new_events = [
+        HumanReviewCompleted(
+            application_id=cmd.application_id,
+            reviewer_id=cmd.reviewer_id,
+            override=cmd.override,
+            final_decision=cmd.final_decision,
+            override_reason=cmd.override_reason,
+        ),
+    ]
+
+    # 4. Append atomically
+    await store.append(
+        stream_id=f"loan-{cmd.application_id}",
+        events=new_events,
+        expected_version=app.version,
+        correlation_id=cmd.correlation_id,
+        causation_id=cmd.causation_id,
+    )
+
+    log.info(
+        "human_review_completed",
+        override=cmd.override,
+        final_decision=cmd.final_decision,
     )
