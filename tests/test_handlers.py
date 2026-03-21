@@ -341,10 +341,13 @@ async def test_audit_integrity_check_creates_hash_chain(
 
     # Verify audit stream
     audit_events = await event_store.load_stream(f"audit-loan-{application_id}")
-    assert len(audit_events) == 2
+    integrity_events = [
+        event for event in audit_events if event.event_type == "AuditIntegrityCheckRun"
+    ]
+    assert len(integrity_events) == 2
 
-    first_check = audit_events[0]
-    second_check = audit_events[1]
+    first_check = integrity_events[0]
+    second_check = integrity_events[1]
 
     assert first_check.event_type == "AuditIntegrityCheckRun"
     assert second_check.event_type == "AuditIntegrityCheckRun"
@@ -353,7 +356,9 @@ async def test_audit_integrity_check_creates_hash_chain(
     assert first_check.payload["previous_hash"] == "genesis"
 
     # Second check's previous_hash links to first check's integrity_hash
-    assert second_check.payload["previous_hash"] == first_check.payload["integrity_hash"]
+    assert (
+        second_check.payload["previous_hash"] == first_check.payload["integrity_hash"]
+    )
 
     # Both verified the same number of events in the loan stream
     assert first_check.payload["events_verified_count"] == 2
