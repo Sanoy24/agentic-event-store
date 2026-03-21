@@ -82,6 +82,14 @@ class AuditLedgerAggregate:
         self.events_verified_count = event.payload.get("events_verified_count", 0)
         self.check_count += 1
 
+    def _on_AuditEventLinked(self, event: StoredEvent) -> None:
+        """
+        Business events mirrored into the audit stream do not change integrity
+        state directly; they exist so the audit trail can be queried from the
+        dedicated AuditLedger stream.
+        """
+        return None
+
     def _on_AuditTamperDetected(self, event: StoredEvent) -> None:
         """
         Record that tampering was detected. The aggregate enters a
