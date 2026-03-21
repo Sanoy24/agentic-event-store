@@ -19,6 +19,30 @@ from psycopg_pool import AsyncConnectionPool
 from src.event_store import EventStore
 
 
+async def _truncate_all_tables(db_url: str) -> None:
+    async with AsyncConnectionPool(db_url) as pool:
+        async with pool.connection() as conn:
+            await conn.execute(
+                """
+                TRUNCATE
+                    events,
+                    event_streams,
+                    projection_checkpoints,
+                    projection_failures,
+                    outbox,
+                    snapshots,
+                    application_summary,
+                    agent_performance_ledger,
+                    compliance_audit_view,
+                    compliance_audit_events,
+                    compliance_audit_snapshots
+                RESTART IDENTITY
+                CASCADE
+                """
+            )
+            await conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # Windows event-loop fix: psycopg async requires SelectorEventLoop
 # ---------------------------------------------------------------------------
@@ -102,23 +126,13 @@ async def event_store(db_url):
         store = EventStore(pool)
         yield store
 
-        # Truncate tables between tests for isolation
-        async with pool.connection() as conn:
-            await conn.execute(
-                """
-                TRUNCATE
-                    events,
-                    event_streams,
-                    projection_checkpoints,
-                    projection_failures,
-                    outbox,
-                    snapshots,
-                    application_summary,
-                    agent_performance_ledger,
-                    compliance_audit_view,
-                    compliance_audit_events,
-                    compliance_audit_snapshots
-                CASCADE
-                """
-            )
-            await conn.commit()
+
+@pytest.fixture(autouse=True)
+async def clean_database(db_url):
+    """
+    Ensure every test starts and ends with a clean database, even when the
+    test does not use the event_store fixture directly.
+    """
+    await _truncate_all_tables(db_url)
+    yield
+    await _truncate_all_tables(db_url)
