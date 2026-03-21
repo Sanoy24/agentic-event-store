@@ -466,11 +466,7 @@ async def handle_generate_decision(
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
 
     # 2. Validate business rules
-    if app.state != ApplicationState.PENDING_DECISION:
-        raise DomainError(
-            f"Application {cmd.application_id} is in state {app.state}, "
-            f"expected {ApplicationState.PENDING_DECISION} for decision generation."
-        )
+    app.assert_pending_decision()
 
     # Rule 6: assert contributing sessions valid
     valid_session_ids = set()
@@ -543,11 +539,7 @@ async def handle_application_approved(
     compliance = await ComplianceRecordAggregate.load(store, cmd.application_id)
 
     # 2. Validate
-    if app.state != ApplicationState.APPROVED_PENDING_HUMAN:
-        raise DomainError(
-            f"Application {cmd.application_id} is in state {app.state}, "
-            f"expected {ApplicationState.APPROVED_PENDING_HUMAN} for approval."
-        )
+    app.assert_approved_pending_human()
 
     # Rule 5: compliance must be complete
     app.assert_compliance_complete(
@@ -898,15 +890,7 @@ async def handle_human_review_completed(
     app = await LoanApplicationAggregate.load(store, cmd.application_id)
 
     # 2. Validate — must be in a pending-human state
-    pending_states = {
-        ApplicationState.APPROVED_PENDING_HUMAN,
-        ApplicationState.DECLINED_PENDING_HUMAN,
-    }
-    if app.state not in pending_states:
-        raise DomainError(
-            f"Application {cmd.application_id} is in state {app.state}, "
-            f"expected one of {pending_states} for human review."
-        )
+    app.assert_pending_human_review()
 
     # 3. Determine new events
     new_events = [
