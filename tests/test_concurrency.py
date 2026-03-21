@@ -197,8 +197,7 @@ async def test_double_decision_concurrency(
 
     # Exactly one agent must fail
     assert len(failures) == 1, (
-        f"Exactly one agent must fail, but {len(failures)} failed. "
-        f"Results: {results}"
+        f"Exactly one agent must fail, but {len(failures)} failed. Results: {results}"
     )
 
     # (a) Total events in stream = 4 (not 5)
