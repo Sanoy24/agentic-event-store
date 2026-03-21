@@ -31,11 +31,13 @@ from src.models.events import (
 # PART A — State Machine
 # =============================================================================
 
+
 class ApplicationState(StrEnum):
     """
     Loan application lifecycle states.
     Uses StrEnum (Python 3.12+) for human-readable serialisation.
     """
+
     SUBMITTED = "SUBMITTED"
     AWAITING_ANALYSIS = "AWAITING_ANALYSIS"
     ANALYSIS_COMPLETE = "ANALYSIS_COMPLETE"
@@ -58,14 +60,15 @@ VALID_TRANSITIONS: dict[ApplicationState, set[ApplicationState]] = {
     },
     ApplicationState.APPROVED_PENDING_HUMAN: {ApplicationState.FINAL_APPROVED},
     ApplicationState.DECLINED_PENDING_HUMAN: {ApplicationState.FINAL_DECLINED},
-    ApplicationState.FINAL_APPROVED: set(),   # Terminal state
-    ApplicationState.FINAL_DECLINED: set(),   # Terminal state
+    ApplicationState.FINAL_APPROVED: set(),  # Terminal state
+    ApplicationState.FINAL_DECLINED: set(),  # Terminal state
 }
 
 
 # =============================================================================
 # PART B — Aggregate Class
 # =============================================================================
+
 
 class LoanApplicationAggregate:
     """
@@ -168,7 +171,9 @@ class LoanApplicationAggregate:
         recommendation = event.payload.get("recommendation", "")
         self.recommendation = recommendation
         self.confidence_score = event.payload.get("confidence_score")
-        self.contributing_sessions = event.payload.get("contributing_agent_sessions", [])
+        self.contributing_sessions = event.payload.get(
+            "contributing_agent_sessions", []
+        )
 
         match recommendation:
             case "APPROVE":
@@ -185,6 +190,11 @@ class LoanApplicationAggregate:
         """Human reviewer has made final decision."""
         if event.payload.get("override", False):
             self.human_review_override = True
+        final_decision = event.payload.get("final_decision")
+        if final_decision == "APPROVE":
+            self.state = ApplicationState.FINAL_APPROVED
+        elif final_decision == "DECLINE":
+            self.state = ApplicationState.FINAL_DECLINED
 
     def _on_ApplicationApproved(self, event: StoredEvent) -> None:
         """Application approved — terminal state."""
@@ -294,7 +304,11 @@ class LoanApplicationAggregate:
                 f"Application {application_id}: DecisionGenerated must reference "
                 f"at least one contributing agent session."
             )
-        invalid = sorted(session_id for session_id in session_ids if session_id not in valid_session_ids)
+        invalid = sorted(
+            session_id
+            for session_id in session_ids
+            if session_id not in valid_session_ids
+        )
         if invalid:
             raise DomainError(
                 f"Application {application_id}: contributing sessions do not "
