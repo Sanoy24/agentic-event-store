@@ -130,6 +130,11 @@ class OptimisticConcurrencyError(Exception):
     recover from concurrency conflicts.
     """
 
+    stream_id: str
+    expected_version: int
+    actual_version: int
+    suggested_action: str
+
     def __init__(self, stream_id: str, expected: int, actual: int):
         self.stream_id = stream_id
         self.expected_version = expected
@@ -151,7 +156,17 @@ class DomainError(Exception):
     (Challenge Doc Phase 2 p.9)
     """
 
-    pass
+    message: str
+    suggested_action: str | None
+
+    def __init__(
+        self,
+        message: str,
+        suggested_action: str | None = None,
+    ):
+        self.message = message
+        self.suggested_action = suggested_action
+        super().__init__(message)
 
 
 class InvalidStateTransitionError(DomainError):
@@ -162,6 +177,10 @@ class InvalidStateTransitionError(DomainError):
     valid transitions. Any out-of-order transition raises this error.
     (Challenge Doc p.10, Business Rule 1)
     """
+
+    from_state: str
+    to_state: str
+    valid_next_states: list[str]
 
     def __init__(self, from_state: str, to_state: str, valid_next: list[str]):
         self.from_state = from_state
@@ -175,6 +194,8 @@ class InvalidStateTransitionError(DomainError):
 
 class StreamArchivedError(DomainError):
     """Raised when attempting to append to an archived stream."""
+
+    stream_id: str
 
     def __init__(self, stream_id: str):
         self.stream_id = stream_id
