@@ -25,6 +25,7 @@ import structlog
 from psycopg_pool import AsyncConnectionPool
 
 from src.models.events import (
+    AuditEventLinked,
     BaseEvent,
     OptimisticConcurrencyError,
     StoredEvent,
@@ -116,65 +117,19 @@ class EventStore:
                             actual=actual_version,
                         )
 
-                    # Step 5: Insert events
-                    # If stream was new (actual_version = -1), start at 0
-                    new_version = max(0, actual_version) 
-                    event_ids: list[UUID] = []
-
-                    for event in events:
-                        new_version += 1
-                        event_payload = event.model_dump(mode="json")
-                        event_metadata = {
-                            "correlation_id": correlation_id,
-                            "causation_id": causation_id,
-                            "recorded_by": "event_store",
-                            "schema_version": event.event_version,
-                        }
-
-                        row = await conn.execute(
-                            """
-                            INSERT INTO events (
-                                stream_id, stream_position, event_type,
-                                event_version, payload, metadata
-                            ) VALUES (%s, %s, %s, %s, %s, %s)
-                            RETURNING event_id
-                            """,
-                            (
-                                stream_id,
-                                new_version,
-                                event.event_type,
-                                event.event_version,
-                                psycopg.types.json.Jsonb(event_payload),
-                                psycopg.types.json.Jsonb(event_metadata),
-                            ),
-                        )
-                        result = await row.fetchone()
-                        if result:
-                            event_ids.append(result[0])
-
-                    # Step 6: Update stream version
-                    await conn.execute(
-                        """
-                        UPDATE event_streams
-                        SET current_version = %s
-                        WHERE stream_id = %s
-                        """,
-                        (new_version, stream_id),
+                    new_version, stored_events = await self._append_events_to_stream(
+                        conn=conn,
+                        stream_id=stream_id,
+                        starting_version=max(0, actual_version),
+                        events=events,
+                        correlation_id=correlation_id,
+                        causation_id=causation_id,
                     )
 
-                    # Step 7: Insert outbox entries
-                    for i, event in enumerate(events):
-                        event_payload = event.model_dump(mode="json")
-                        await conn.execute(
-                            """
-                            INSERT INTO outbox (event_id, destination, payload)
-                            VALUES (%s, %s, %s)
-                            """,
-                            (
-                                event_ids[i],
-                                f"default:{event.event_type}",
-                                psycopg.types.json.Jsonb(event_payload),
-                            ),
+                    if not stream_id.startswith("audit-"):
+                        await self._append_audit_entries(
+                            conn=conn,
+                            stored_events=stored_events,
                         )
 
                     log.info(
@@ -259,6 +214,147 @@ class EventStore:
         """
         return stream_id.split("-")[0]
 
+    async def _append_events_to_stream(
+        self,
+        *,
+        conn: psycopg.AsyncConnection,
+        stream_id: str,
+        starting_version: int,
+        events: list[BaseEvent],
+        correlation_id: str | None,
+        causation_id: str | None,
+    ) -> tuple[int, list[StoredEvent]]:
+        new_version = starting_version
+        stored_events: list[StoredEvent] = []
+
+        for event in events:
+            new_version += 1
+            event_payload = event.model_dump(mode="json")
+            event_metadata = {
+                "correlation_id": correlation_id,
+                "causation_id": causation_id,
+                "recorded_by": "event_store",
+                "schema_version": event.event_version,
+            }
+
+            row = await conn.execute(
+                """
+                INSERT INTO events (
+                    stream_id, stream_position, event_type,
+                    event_version, payload, metadata
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING event_id, global_position, recorded_at
+                """,
+                (
+                    stream_id,
+                    new_version,
+                    event.event_type,
+                    event.event_version,
+                    psycopg.types.json.Jsonb(event_payload),
+                    psycopg.types.json.Jsonb(event_metadata),
+                ),
+            )
+            result = await row.fetchone()
+            if result:
+                stored_events.append(
+                    StoredEvent(
+                        event_id=result[0],
+                        stream_id=stream_id,
+                        stream_position=new_version,
+                        global_position=result[1],
+                        event_type=event.event_type,
+                        event_version=event.event_version,
+                        payload=event_payload,
+                        metadata=event_metadata,
+                        recorded_at=result[2],
+                    )
+                )
+
+        await conn.execute(
+            """
+            UPDATE event_streams
+            SET current_version = %s
+            WHERE stream_id = %s
+            """,
+            (new_version, stream_id),
+        )
+
+        for stored_event in stored_events:
+            await conn.execute(
+                """
+                INSERT INTO outbox (event_id, destination, payload)
+                VALUES (%s, %s, %s)
+                """,
+                (
+                    stored_event.event_id,
+                    f"default:{stored_event.event_type}",
+                    psycopg.types.json.Jsonb(stored_event.payload),
+                ),
+            )
+
+        return new_version, stored_events
+
+    async def _append_audit_entries(
+        self,
+        *,
+        conn: psycopg.AsyncConnection,
+        stored_events: list[StoredEvent],
+    ) -> None:
+        grouped_events: dict[str, list[AuditEventLinked]] = {}
+
+        for stored_event in stored_events:
+            audit_target = self._infer_audit_target(stored_event)
+            if audit_target is None:
+                continue
+
+            entity_type, entity_id = audit_target
+            audit_stream_id = f"audit-{entity_type}-{entity_id}"
+            grouped_events.setdefault(audit_stream_id, []).append(
+                AuditEventLinked(
+                    entity_id=entity_id,
+                    source_event_id=str(stored_event.event_id),
+                    source_stream_id=stored_event.stream_id,
+                    source_stream_position=stored_event.stream_position,
+                    source_global_position=stored_event.global_position,
+                    source_event_type=stored_event.event_type,
+                    source_event_version=stored_event.event_version,
+                    source_recorded_at=stored_event.recorded_at,
+                    correlation_id=stored_event.metadata.get("correlation_id"),
+                    causation_id=stored_event.metadata.get("causation_id"),
+                    payload_snapshot=stored_event.payload,
+                    metadata_snapshot=stored_event.metadata,
+                )
+            )
+
+        for audit_stream_id, audit_events in grouped_events.items():
+            audit_version = await self._get_or_create_stream(
+                conn,
+                audit_stream_id,
+                expected_version=-1,
+            )
+            await self._append_events_to_stream(
+                conn=conn,
+                stream_id=audit_stream_id,
+                starting_version=max(0, audit_version),
+                events=audit_events,
+                correlation_id=audit_events[-1].correlation_id,
+                causation_id=audit_events[-1].source_event_id,
+            )
+
+    @staticmethod
+    def _infer_audit_target(stored_event: StoredEvent) -> tuple[str, str] | None:
+        if stored_event.stream_id.startswith("audit-"):
+            return None
+
+        application_id = stored_event.payload.get("application_id")
+        if application_id:
+            return ("loan", application_id)
+
+        if stored_event.stream_id.startswith("loan-"):
+            return ("loan", stored_event.stream_id.removeprefix("loan-"))
+
+        return None
+
     # =========================================================================
     # READ PATH
     # =========================================================================
@@ -312,7 +408,13 @@ class EventStore:
 
             # Apply upcasters if registry is available
             if self._upcasters is not None:
-                events = [self._upcasters.upcast(e) for e in events]
+                events = [
+                    await self._upcasters.upcast_event(
+                        e,
+                        context={"store": self},
+                    )
+                    for e in events
+                ]
 
             return events
 
@@ -347,7 +449,13 @@ class EventStore:
             events = [self._row_to_stored_event(row) for row in rows]
 
             if self._upcasters is not None:
-                events = [self._upcasters.upcast(e) for e in events]
+                events = [
+                    await self._upcasters.upcast_event(
+                        e,
+                        context={"store": self},
+                    )
+                    for e in events
+                ]
 
             return events
 
@@ -405,7 +513,10 @@ class EventStore:
                 for row in rows:
                     event = self._row_to_stored_event(row)
                     if self._upcasters is not None:
-                        event = self._upcasters.upcast(event)
+                        event = await self._upcasters.upcast_event(
+                            event,
+                            context={"store": self},
+                        )
                     current_position = event.global_position
                     yield event
 
