@@ -33,11 +33,11 @@ class AgentSessionAggregate:
         self.agent_id = agent_id
         self.session_id = session_id
         self.version: int = 0
-        self.context_loaded: bool = False       # Gas Town: must be True before decisions
+        self.context_loaded: bool = False  # Gas Town: must be True before decisions
         self.model_version: str | None = None
         self.context_source: str | None = None
         self.context_position: int | None = None
-        self.decisions: list[str] = []          # application_ids decided in this session
+        self.decisions: list[str] = []  # application_ids decided in this session
         self.is_active: bool = True
 
     @classmethod
