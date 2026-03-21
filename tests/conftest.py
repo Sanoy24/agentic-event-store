@@ -105,6 +105,20 @@ async def event_store(db_url):
         # Truncate tables between tests for isolation
         async with pool.connection() as conn:
             await conn.execute(
-                "TRUNCATE events, event_streams, projection_checkpoints, outbox CASCADE"
+                """
+                TRUNCATE
+                    events,
+                    event_streams,
+                    projection_checkpoints,
+                    projection_failures,
+                    outbox,
+                    snapshots,
+                    application_summary,
+                    agent_performance_ledger,
+                    compliance_audit_view,
+                    compliance_audit_events,
+                    compliance_audit_snapshots
+                CASCADE
+                """
             )
             await conn.commit()
