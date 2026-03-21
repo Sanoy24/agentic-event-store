@@ -172,6 +172,22 @@ CREATE TABLE projection_checkpoints (
     -- stalled projections without querying the events table.
 );
 
+CREATE TABLE projection_failures (
+    projection_name TEXT NOT NULL,
+    global_position BIGINT NOT NULL,
+    stream_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    retry_count INT NOT NULL DEFAULT 0,
+    first_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    skipped_at TIMESTAMPTZ,
+    PRIMARY KEY (projection_name, global_position)
+);
+
+CREATE INDEX idx_projection_failures_active
+    ON projection_failures (projection_name, last_failed_at)
+    WHERE skipped_at IS NULL;
+
 
 -- =============================================================================
 -- TABLE: outbox
@@ -232,13 +248,13 @@ CREATE INDEX idx_outbox_unpublished ON outbox (published_at, created_at)
 --
 -- 3. SNAPSHOTS TABLE: For aggregates with long event streams (1000+ events),
 --    periodic snapshots reduce load time from O(n) to O(1) + O(events_since_snapshot).
---    CREATE TABLE snapshots (
---        stream_id TEXT NOT NULL,
---        version BIGINT NOT NULL,
---        payload JSONB NOT NULL,
---        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
---        PRIMARY KEY (stream_id, version)
---    );
+CREATE TABLE snapshots (
+    stream_id TEXT NOT NULL,
+    version BIGINT NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (stream_id, version)
+);
 --
 -- 4. EVENT DEDUPLICATION: An idempotency_key column on events would prevent
 --    duplicate event writes from retrying command handlers. This is especially
@@ -253,3 +269,105 @@ CREATE INDEX idx_outbox_unpublished ON outbox (published_at, created_at)
 --    that payload is always a JSON object (not array, string, or null).
 --    CHECK (jsonb_typeof(payload) = 'object')
 -- =============================================================================
+
+-- =============================================================================
+-- PROJECTION TABLES
+-- =============================================================================
+
+CREATE TABLE application_summary (
+    application_id TEXT PRIMARY KEY,
+    state TEXT,
+    applicant_id TEXT,
+    applicant_name TEXT,
+    requested_amount_usd NUMERIC,
+    risk_tier TEXT,
+    confidence_score NUMERIC,
+    fraud_score NUMERIC,
+    compliance_status TEXT,
+    decision TEXT,
+    human_reviewer_id TEXT,
+    override BOOLEAN,
+    override_reason TEXT,
+    final_decision TEXT,
+    approved_amount_usd NUMERIC,
+    interest_rate NUMERIC,
+    conditions JSONB,
+    final_decision_at TIMESTAMPTZ,
+    last_event_type TEXT,
+    last_event_at TIMESTAMPTZ,
+    agent_sessions JSONB DEFAULT '[]'::jsonb,
+    decline_reasons JSONB DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE agent_performance_ledger (
+    agent_id TEXT,
+    model_version TEXT,
+    analyses_completed INT DEFAULT 0,
+    decisions_generated INT DEFAULT 0,
+    approve_count INT DEFAULT 0,
+    decline_count INT DEFAULT 0,
+    refer_count INT DEFAULT 0,
+    human_override_count INT DEFAULT 0,
+    superseded_count INT DEFAULT 0,
+    total_confidence NUMERIC DEFAULT 0,
+    total_duration_ms INT DEFAULT 0,
+    first_seen_at TIMESTAMPTZ,
+    last_seen_at TIMESTAMPTZ,
+    PRIMARY KEY (agent_id, model_version)
+);
+
+CREATE TABLE compliance_audit_view (
+    application_id TEXT PRIMARY KEY,
+    regulation_set_version TEXT,
+    checks_required JSONB DEFAULT '[]'::jsonb,
+    checks_passed JSONB DEFAULT '[]'::jsonb,
+    checks_failed JSONB DEFAULT '[]'::jsonb,
+    rule_results JSONB DEFAULT '{}'::jsonb,
+    compliance_status TEXT,
+    clearance_issued BOOLEAN DEFAULT FALSE,
+    clearance_timestamp TIMESTAMPTZ,
+    clearance_issued_by TEXT,
+    events_processed INT DEFAULT 0,
+    last_event_id UUID,
+    last_global_position BIGINT DEFAULT 0,
+    last_event_type TEXT,
+    last_event_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE compliance_audit_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_id UUID NOT NULL UNIQUE,
+    global_position BIGINT NOT NULL UNIQUE,
+    application_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    regulation_set_version TEXT,
+    rule_id TEXT,
+    rule_version TEXT,
+    verdict TEXT,
+    detail JSONB DEFAULT '{}'::jsonb,
+    event_timestamp TIMESTAMPTZ NOT NULL
+);
+
+CREATE INDEX idx_compliance_audit_events_lookup
+    ON compliance_audit_events (application_id, event_timestamp, global_position);
+
+CREATE TABLE compliance_audit_snapshots (
+    snapshot_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    application_id TEXT NOT NULL,
+    snapshot_version INT NOT NULL,
+    source_event_id UUID NOT NULL UNIQUE,
+    source_global_position BIGINT NOT NULL UNIQUE,
+    snapshot_taken_at TIMESTAMPTZ NOT NULL,
+    state JSONB NOT NULL
+);
+
+CREATE INDEX idx_compliance_audit_snapshots_lookup
+    ON compliance_audit_snapshots (
+        application_id,
+        snapshot_version,
+        snapshot_taken_at DESC,
+        source_global_position DESC
+    );
