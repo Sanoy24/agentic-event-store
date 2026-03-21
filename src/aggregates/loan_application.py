@@ -256,6 +256,34 @@ class LoanApplicationAggregate:
                 f"recorded. Cannot submit another without HumanReviewOverride."
             )
 
+    def assert_pending_decision(self) -> None:
+        """Decision generation requires compliance clearance first."""
+        if self.state != ApplicationState.PENDING_DECISION:
+            raise DomainError(
+                f"Application {self.application_id} is in state {self.state}, "
+                f"expected {ApplicationState.PENDING_DECISION} for decision generation."
+            )
+
+    def assert_approved_pending_human(self) -> None:
+        """Formal approval requires an approval recommendation awaiting review."""
+        if self.state != ApplicationState.APPROVED_PENDING_HUMAN:
+            raise DomainError(
+                f"Application {self.application_id} is in state {self.state}, "
+                f"expected {ApplicationState.APPROVED_PENDING_HUMAN} for approval."
+            )
+
+    def assert_pending_human_review(self) -> None:
+        """Human review is only valid after a machine recommendation exists."""
+        pending_states = {
+            ApplicationState.APPROVED_PENDING_HUMAN,
+            ApplicationState.DECLINED_PENDING_HUMAN,
+        }
+        if self.state not in pending_states:
+            raise DomainError(
+                f"Application {self.application_id} is in state {self.state}, "
+                f"expected one of {pending_states} for human review."
+            )
+
     def assert_compliance_complete(
         self,
         required_checks: list[str],
