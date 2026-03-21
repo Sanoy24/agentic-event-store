@@ -220,6 +220,90 @@ class Recommendation(StrEnum):
     REFER = "REFER"
 
 
+# --- DocumentPackage Events ---
+
+
+class PackageCreated(BaseEvent):
+    """(DocumentPackage aggregate, v1)"""
+
+    event_type: ClassVar[str] = "PackageCreated"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+
+
+class DocumentAdded(BaseEvent):
+    """(DocumentPackage aggregate, v1)"""
+
+    event_type: ClassVar[str] = "DocumentAdded"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    document_id: str
+    file_name: str
+    document_type: str
+
+
+class DocumentFormatValidated(BaseEvent):
+    """(DocumentPackage aggregate, v1)"""
+
+    event_type: ClassVar[str] = "DocumentFormatValidated"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    document_id: str
+    is_valid: bool
+    format_notes: str | None = None
+
+
+class ExtractionStarted(BaseEvent):
+    """(DocumentPackage aggregate, v1)"""
+
+    event_type: ClassVar[str] = "ExtractionStarted"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    document_id: str
+    extraction_model: str
+
+
+class ExtractionCompleted(BaseEvent):
+    """(DocumentPackage aggregate, v1)"""
+
+    event_type: ClassVar[str] = "ExtractionCompleted"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    document_id: str
+    facts: dict
+    field_confidence: dict[str, float]
+    extraction_notes: list[str]
+
+
+class QualityAssessmentCompleted(BaseEvent):
+    """(DocumentPackage aggregate, v1)"""
+
+    event_type: ClassVar[str] = "QualityAssessmentCompleted"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    overall_confidence: float
+    is_coherent: bool
+    anomalies: list[str]
+    critical_missing_fields: list[str]
+    reextraction_recommended: bool
+    auditor_notes: str
+
+
+class PackageReadyForAnalysis(BaseEvent):
+    """(DocumentPackage aggregate, v1)"""
+
+    event_type: ClassVar[str] = "PackageReadyForAnalysis"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+
+
 # --- LoanApplication Events ---
 
 
@@ -242,6 +326,35 @@ class ApplicationSubmitted(BaseEvent):
     loan_purpose: LoanPurpose
     submission_channel: str  # "web" | "mobile" | "agent" | "branch"
     submitted_at: datetime
+
+
+class DocumentUploadRequested(BaseEvent):
+    """(LoanApplication aggregate, v1)"""
+
+    event_type: ClassVar[str] = "DocumentUploadRequested"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+
+
+class DocumentUploaded(BaseEvent):
+    """(LoanApplication aggregate, v1)"""
+
+    event_type: ClassVar[str] = "DocumentUploaded"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    document_id: str
+    file_path: str
+
+
+class HumanReviewRequested(BaseEvent):
+    """(LoanApplication aggregate, v1)"""
+
+    event_type: ClassVar[str] = "HumanReviewRequested"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
 
 
 class CreditAnalysisRequested(BaseEvent):
@@ -369,6 +482,20 @@ class ApplicationDeclined(BaseEvent):
 # --- AgentSession Events ---
 
 
+class AgentSessionStarted(BaseEvent):
+    """Gas Town anchor. (AgentSession aggregate, v1)"""
+
+    event_type: ClassVar[str] = "AgentSessionStarted"
+    event_version: ClassVar[int] = 1
+
+    agent_id: str
+    session_id: str
+    agent_type: str
+    model_version: str
+    context_source: str
+    context_token_count: int = Field(ge=0)
+
+
 class AgentContextLoaded(BaseEvent):
     """
     First event in every AgentSession stream (Gas Town pattern).
@@ -394,6 +521,116 @@ class AgentContextLoaded(BaseEvent):
     model_version: str
 
 
+class AgentInputValidated(BaseEvent):
+    """(AgentSession aggregate, v1)"""
+
+    event_type: ClassVar[str] = "AgentInputValidated"
+    event_version: ClassVar[int] = 1
+
+    agent_id: str
+    session_id: str
+    inputs_validated: list[str]
+    validation_duration_ms: int = Field(ge=0)
+
+
+class AgentInputValidationFailed(BaseEvent):
+    """(AgentSession aggregate, v1)"""
+
+    event_type: ClassVar[str] = "AgentInputValidationFailed"
+    event_version: ClassVar[int] = 1
+
+    agent_id: str
+    session_id: str
+    missing_inputs: list[str]
+    validation_errors: list[str]
+
+
+class AgentNodeExecuted(BaseEvent):
+    """(AgentSession aggregate, v1)"""
+
+    event_type: ClassVar[str] = "AgentNodeExecuted"
+    event_version: ClassVar[int] = 1
+
+    agent_id: str
+    session_id: str
+    node_name: str
+    node_sequence: int
+    input_keys: list[str]
+    output_keys: list[str]
+    llm_called: bool
+    llm_tokens_input: int | None = None
+    llm_tokens_output: int | None = None
+    llm_cost_usd: float | None = None
+    duration_ms: int = Field(ge=0)
+
+
+class AgentToolCalled(BaseEvent):
+    """(AgentSession aggregate, v1)"""
+
+    event_type: ClassVar[str] = "AgentToolCalled"
+    event_version: ClassVar[int] = 1
+
+    agent_id: str
+    session_id: str
+    tool_name: str
+    tool_input_summary: str
+    tool_output_summary: str
+    tool_duration_ms: int = Field(ge=0)
+
+
+class AgentOutputWritten(BaseEvent):
+    """(AgentSession aggregate, v1)"""
+
+    event_type: ClassVar[str] = "AgentOutputWritten"
+    event_version: ClassVar[int] = 1
+
+    agent_id: str
+    session_id: str
+    events_written: list[dict]
+    output_summary: str
+
+
+class AgentSessionCompleted(BaseEvent):
+    """(AgentSession aggregate, v1)"""
+
+    event_type: ClassVar[str] = "AgentSessionCompleted"
+    event_version: ClassVar[int] = 1
+
+    agent_id: str
+    session_id: str
+    total_nodes_executed: int
+    total_llm_calls: int
+    total_tokens_used: int
+    total_cost_usd: float
+    next_agent_triggered: str | None = None
+
+
+class AgentSessionFailed(BaseEvent):
+    """(AgentSession aggregate, v1)"""
+
+    event_type: ClassVar[str] = "AgentSessionFailed"
+    event_version: ClassVar[int] = 1
+
+    agent_id: str
+    session_id: str
+    error_type: str
+    error_message: str
+    last_successful_node: str | None = None
+    recoverable: bool
+
+
+class AgentSessionRecovered(BaseEvent):
+    """(AgentSession aggregate, v1)"""
+
+    event_type: ClassVar[str] = "AgentSessionRecovered"
+    event_version: ClassVar[int] = 1
+
+    agent_id: str
+    session_id: str
+    recovered_from_session_id: str
+    recovery_point: str
+
+
 class FraudScreeningCompleted(BaseEvent):
     """
     Records the completion of fraud screening by a FraudDetection agent.
@@ -412,6 +649,76 @@ class FraudScreeningCompleted(BaseEvent):
     input_data_hash: str
 
 
+# --- CreditRecord Events ---
+
+
+class CreditRecordOpened(BaseEvent):
+    """(CreditRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "CreditRecordOpened"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    agent_id: str
+
+
+class HistoricalProfileConsumed(BaseEvent):
+    """(CreditRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "HistoricalProfileConsumed"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    profile_data: dict
+
+
+class ExtractedFactsConsumed(BaseEvent):
+    """(CreditRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "ExtractedFactsConsumed"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    facts_data: dict
+
+
+class CreditAnalysisDeferred(BaseEvent):
+    """(CreditRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "CreditAnalysisDeferred"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    agent_id: str
+    reason: str
+
+
+# --- FraudScreening Events ---
+
+
+class FraudScreeningInitiated(BaseEvent):
+    """(FraudScreening aggregate, v1)"""
+
+    event_type: ClassVar[str] = "FraudScreeningInitiated"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    agent_id: str
+
+
+class FraudAnomalyDetected(BaseEvent):
+    """(FraudScreening aggregate, v1)"""
+
+    event_type: ClassVar[str] = "FraudAnomalyDetected"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    agent_id: str
+    anomaly_type: str
+    description: str
+    severity: float
+    evidence: str
+
 # --- ComplianceRecord Events ---
 
 
@@ -427,6 +734,72 @@ class ComplianceCheckRequested(BaseEvent):
     application_id: str
     regulation_set_version: str
     checks_required: list[str]
+
+
+class ComplianceCheckInitiated(BaseEvent):
+    """(ComplianceRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "ComplianceCheckInitiated"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    agent_id: str
+
+
+class ComplianceRuleNoted(BaseEvent):
+    """(ComplianceRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "ComplianceRuleNoted"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    rule_id: str
+    note_type: str
+    note: str
+
+
+class ComplianceCheckCompleted(BaseEvent):
+    """(ComplianceRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "ComplianceCheckCompleted"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    overall_verdict: str
+    has_hard_block: bool
+
+
+class ComplianceRulePassed(BaseEvent):
+    """(ComplianceRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "ComplianceCheckInitiated"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    agent_id: str
+
+
+class ComplianceRuleNoted(BaseEvent):
+    """(ComplianceRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "ComplianceRuleNoted"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    rule_id: str
+    note_type: str
+    note: str
+
+
+class ComplianceCheckCompleted(BaseEvent):
+    """(ComplianceRecord aggregate, v1)"""
+
+    event_type: ClassVar[str] = "ComplianceCheckCompleted"
+    event_version: ClassVar[int] = 1
+
+    application_id: str
+    overall_verdict: str
+    has_hard_block: bool
 
 
 class ComplianceRulePassed(BaseEvent):
@@ -480,6 +853,32 @@ class AuditIntegrityCheckRun(BaseEvent):
     events_verified_count: int = Field(ge=0)
     integrity_hash: str
     previous_hash: str  # Chain link to previous check
+
+
+class AuditEventLinked(BaseEvent):
+    """
+    Records a business event in the cross-stream AuditLedger trail.
+
+    This is the AuditLedger fact that ties loan, compliance, and agent-session
+    events together for a single business entity without mutating the source
+    streams themselves.
+    """
+
+    event_type: ClassVar[str] = "AuditEventLinked"
+    event_version: ClassVar[int] = 1
+
+    entity_id: str
+    source_event_id: str
+    source_stream_id: str
+    source_stream_position: int
+    source_global_position: int
+    source_event_type: str
+    source_event_version: int
+    source_recorded_at: datetime
+    correlation_id: str | None = None
+    causation_id: str | None = None
+    payload_snapshot: dict[str, Any]
+    metadata_snapshot: dict[str, Any]
 
 
 # =============================================================================
