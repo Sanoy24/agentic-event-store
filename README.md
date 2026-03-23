@@ -79,27 +79,93 @@ tests/test_concurrency.py::test_double_decision_concurrency PASSED
 # One agent succeeds (version 3→4), one receives OptimisticConcurrencyError
 ```
 
-## Project Structure
+## Running the Application
+
+### 1. Start the Projections Daemon
+
+The Async Projection Daemon continuously polls the event store (or uses `LISTEN/NOTIFY`) to rebuild read models in near real-time.
+
+```bash
+uv run python -m src.projections.daemon
+```
+
+### 2. Start the MCP Server
+
+The MCP (Model Context Protocol) Server exposes the event commands as `Tools` and projections as `Resources` to connected AI Agents or clients.
+
+```bash
+# Using FastMCP
+uv run python -m src.mcp.server
+```
+*Note: The server uses stdio for communication by default, integrating seamlessly with Claude Desktop or cursor.*
+
+## Advanced Features (Phase 4-6)
+
+### Temporal What-If Analysis (Bonus 1)
+To run counterfactual scenarios (e.g., branching an event stream in-memory without modifying the real ledger to see projected outcomes):
+```python
+from src.what_if.projector import run_what_if, WhatIfScenario
+# Pass your scenario and event store connection
+result = await run_what_if(store, scenario)
+```
+
+### Regulatory Examination Packaging (Bonus 2)
+To generate a cryptographically sealed JSON package proving an AI agent's decision chain:
+```python
+from datetime import datetime, timezone
+from src.regulatory.package import generate_regulatory_package
+# This pulls the full context from Gas Town and verifies the audit chain hashes
+pkg = await generate_regulatory_package(
+    store,
+    "application_id",
+    datetime.now(timezone.utc),
+)
+```
+
+## Complete Project Structure
 
 ```
 trp1-ledger/
 ├── pyproject.toml                  # Project config and dependencies
 ├── .python-version                 # Python 3.12
 ├── README.md                       # This file
-├── DOMAIN_NOTES.md                 # Phase 0 written deliverable
+├── docs/                           # Challenge documentation and notes
 ├── src/
-│   ├── schema.sql                  # PostgreSQL schema with design rationale
 │   ├── event_store.py              # EventStore async class
+│   ├── schema.sql                  # PostgreSQL schema with design rationale
 │   ├── models/
-│   │   └── events.py               # All domain events, exceptions, base classes
+│   │   └── events.py               # Domain events, exceptions, base classes
 │   ├── aggregates/
 │   │   ├── loan_application.py     # LoanApplication aggregate with state machine
-│   │   └── agent_session.py        # AgentSession aggregate with Gas Town
-│   └── commands/
-│       └── handlers.py             # Command handlers (load → validate → determine → append)
+│   │   ├── agent_session.py        # AgentSession aggregate with Gas Town
+│   │   ├── audit_ledger.py         # Cryptographic audit aggregate
+│   │   └── compliance_record.py    # Compliance tracking aggregate
+│   ├── commands/
+│   │   └── handlers.py             # Command handlers (load → validate → append)
+│   ├── integrity/
+│   │   ├── audit_chain.py          # Cryptographic hashing & tamper detection
+│   │   └── gas_town.py             # Agent Memory Context restoration
+│   ├── mcp/
+│   │   ├── server.py               # MCP Server entry point
+│   │   ├── tools.py                # MCP commands (submit, analyze, decide)
+│   │   └── resources.py            # MCP temporal projections
+│   ├── projections/
+│   │   ├── daemon.py               # Async projection polling daemon
+│   │   └── ...                     # Read models (AgentPerformance, ApplicationSummary)
+│   ├── regulatory/
+│   │   └── package.py              # Self-contained Regulatory JSON packager
+│   ├── upcasting/
+│   │   ├── registry.py             # Schema immutability & UpcasterRegistry
+│   │   └── upcasters.py            # v1→v2 migrations ran at read-time
+│   └── what_if/
+│       └── projector.py            # Counterfactual in-memory what-if projections
 └── tests/
     ├── conftest.py                 # Test infra (testcontainers, fixtures)
-    └── test_concurrency.py         # Double-decision concurrency test (MANDATORY)
+    ├── test_concurrency.py         # Double-decision concurrency tests
+    ├── test_gas_town.py            # Agent context re-population
+    ├── test_mcp_lifecycle.py       # Full lifecycle integration tests
+    ├── test_projections.py         # Async projection builder tests
+    └── test_upcasting.py           # Read-time upcasting tests
 ```
 
 ## Technology Stack
