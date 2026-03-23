@@ -15,6 +15,11 @@ import structlog
 from src.event_store import EventStore
 from src.integrity.audit_chain import _compute_chain_hash, _hash_event
 from src.models.events import StoredEvent
+from src.projections.agent_performance import reconstruct_agent_performance_from_events
+from src.projections.application_summary import (
+    reconstruct_application_summary_from_events,
+)
+from src.projections.compliance_audit import get_compliance_at
 
 logger = structlog.get_logger()
 
@@ -87,16 +92,26 @@ async def generate_regulatory_package(
         for event in events_as_of
         if event.stream_id == f"compliance-{application_id}"
     ]
+    async with store._pool.connection() as conn:  # noqa: SLF001 - read-only projection query
+        compliance_as_of = await get_compliance_at(conn, application_id, examination_date)
+    if (
+        compliance_as_of.get("compliance_status") == "UNKNOWN"
+        and compliance_events
+    ):
+        compliance_as_of = _compliance_summary_from_events(
+            application_id,
+            compliance_events,
+        )
+
     projection_states = {
-        "application_summary": _application_summary_from_events(
+        "application_summary": reconstruct_application_summary_from_events(
             application_id,
             events_as_of,
         ),
-        "compliance_audit_view": _compliance_summary_from_events(
-            application_id,
-            compliance_events,
+        "compliance_audit_view": compliance_as_of,
+        "agent_performance_ledger": reconstruct_agent_performance_from_events(
+            events_as_of
         ),
-        "agent_performance_ledger": _agent_performance_from_events(events_as_of),
     }
     integrity_check = await _integrity_as_of(store, application_id, examination_date)
     model_provenance = _collect_model_provenance(events_as_of, agent_sessions)
@@ -213,108 +228,6 @@ def _session_context_from_events(
     }
 
 
-def _application_summary_from_events(
-    application_id: str,
-    events: list[StoredEvent],
-) -> dict[str, Any]:
-    """Reconstruct the ApplicationSummary projection state as-of a timestamp."""
-    state = {
-        "application_id": application_id,
-        "state": None,
-        "applicant_id": None,
-        "applicant_name": None,
-        "requested_amount_usd": None,
-        "risk_tier": None,
-        "confidence_score": None,
-        "fraud_score": None,
-        "compliance_status": None,
-        "decision": None,
-        "human_reviewer_id": None,
-        "override": None,
-        "override_reason": None,
-        "final_decision": None,
-        "approved_amount_usd": None,
-        "interest_rate": None,
-        "conditions": [],
-        "final_decision_at": None,
-        "last_event_type": None,
-        "last_event_at": None,
-        "agent_sessions": [],
-        "decline_reasons": [],
-        "created_at": None,
-        "updated_at": None,
-    }
-
-    for event in events:
-        payload = event.payload
-        if payload.get("application_id") != application_id and event.stream_id != f"loan-{application_id}":
-            continue
-
-        state["last_event_type"] = event.event_type
-        state["last_event_at"] = event.recorded_at.isoformat()
-        state["updated_at"] = event.recorded_at.isoformat()
-        if state["created_at"] is None:
-            state["created_at"] = event.recorded_at.isoformat()
-
-        if event.event_type == "ApplicationSubmitted":
-            state["state"] = "SUBMITTED"
-            state["applicant_id"] = payload.get("applicant_id")
-            state["applicant_name"] = payload.get("applicant_name")
-            state["requested_amount_usd"] = str(payload.get("requested_amount_usd"))
-        elif event.event_type == "CreditAnalysisRequested":
-            state["state"] = "AWAITING_ANALYSIS"
-        elif event.event_type == "CreditAnalysisCompleted":
-            state["state"] = "ANALYSIS_COMPLETE"
-            state["risk_tier"] = payload.get("risk_tier")
-            state["confidence_score"] = payload.get("confidence_score")
-            state["agent_sessions"].append(payload.get("session_id", ""))
-        elif event.event_type == "FraudScreeningCompleted":
-            state["fraud_score"] = payload.get("fraud_score")
-        elif event.event_type == "ComplianceCheckRequested":
-            state["state"] = "COMPLIANCE_REVIEW"
-            state["compliance_status"] = "IN_PROGRESS"
-        elif event.event_type == "ComplianceClearanceIssued":
-            state["state"] = "PENDING_DECISION"
-            state["compliance_status"] = "CLEARED"
-        elif event.event_type == "DecisionGenerated":
-            recommendation = payload.get("recommendation")
-            state["state"] = (
-                "APPROVED_PENDING_HUMAN"
-                if recommendation == "APPROVE"
-                else "DECLINED_PENDING_HUMAN"
-            )
-            state["decision"] = recommendation
-            state["confidence_score"] = payload.get("confidence_score")
-        elif event.event_type == "ApplicationUnderReview":
-            state["human_reviewer_id"] = payload.get("assigned_reviewer_id")
-        elif event.event_type == "HumanReviewCompleted":
-            final_decision = payload.get("final_decision")
-            state["state"] = (
-                "FINAL_APPROVED"
-                if final_decision == "APPROVE"
-                else "FINAL_DECLINED" if final_decision == "DECLINE" else state["state"]
-            )
-            state["human_reviewer_id"] = payload.get("reviewer_id")
-            state["override"] = payload.get("override", False)
-            state["override_reason"] = payload.get("override_reason")
-            state["final_decision"] = final_decision
-            state["final_decision_at"] = event.recorded_at.isoformat()
-        elif event.event_type == "ApplicationApproved":
-            state["state"] = "FINAL_APPROVED"
-            state["approved_amount_usd"] = str(payload.get("approved_amount_usd"))
-            state["interest_rate"] = str(payload.get("interest_rate"))
-            state["conditions"] = list(payload.get("conditions", []))
-            state["final_decision"] = "APPROVED"
-            state["final_decision_at"] = payload.get("effective_date")
-        elif event.event_type == "ApplicationDeclined":
-            state["state"] = "FINAL_DECLINED"
-            state["decline_reasons"] = list(payload.get("decline_reasons", []))
-            state["final_decision"] = "DECLINED"
-            state["final_decision_at"] = event.recorded_at.isoformat()
-
-    return state
-
-
 def _compliance_summary_from_events(
     application_id: str,
     events: list[StoredEvent],
@@ -389,82 +302,6 @@ def _compliance_summary_from_events(
         "last_event_at": last_event_at,
         "updated_at": last_event_at,
     }
-
-
-def _agent_performance_from_events(
-    events_as_of: list[StoredEvent],
-) -> list[dict[str, Any]]:
-    rows: dict[tuple[str, str], dict[str, Any]] = {}
-    for event in events_as_of:
-        payload = event.payload
-        if event.event_type == "CreditAnalysisCompleted":
-            key = (payload.get("agent_id", "unknown"), payload.get("model_version", "unknown"))
-            row = _ensure_agent_performance_row(rows, key, event.recorded_at.isoformat())
-            row["analyses_completed"] += 1
-            row["total_confidence"] += float(payload.get("confidence_score", 0.0))
-            row["total_duration_ms"] += int(payload.get("analysis_duration_ms", 0))
-            row["last_seen_at"] = event.recorded_at.isoformat()
-        elif event.event_type == "FraudScreeningCompleted":
-            key = (
-                payload.get("agent_id", "unknown"),
-                payload.get("screening_model_version", "unknown"),
-            )
-            row = _ensure_agent_performance_row(rows, key, event.recorded_at.isoformat())
-            row["analyses_completed"] += 1
-            row["last_seen_at"] = event.recorded_at.isoformat()
-        elif event.event_type == "DecisionGenerated":
-            model_version = payload.get("model_versions", {}).get("orchestrator", "unknown")
-            key = (payload.get("orchestrator_agent_id", "unknown"), model_version)
-            row = _ensure_agent_performance_row(rows, key, event.recorded_at.isoformat())
-            row["decisions_generated"] += 1
-            recommendation = payload.get("recommendation")
-            if recommendation == "APPROVE":
-                row["approve_count"] += 1
-            elif recommendation == "DECLINE":
-                row["decline_count"] += 1
-            elif recommendation == "REFER":
-                row["refer_count"] += 1
-            row["last_seen_at"] = event.recorded_at.isoformat()
-        elif event.event_type == "HumanReviewCompleted" and payload.get("override", False):
-            key = (payload.get("reviewer_id", "unknown"), "human")
-            row = _ensure_agent_performance_row(rows, key, event.recorded_at.isoformat())
-            row["human_override_count"] += 1
-            row["last_seen_at"] = event.recorded_at.isoformat()
-        elif event.event_type == "AgentDecisionSuperseded":
-            key = (payload.get("agent_id", "unknown"), payload.get("model_version", "unknown"))
-            row = _ensure_agent_performance_row(rows, key, event.recorded_at.isoformat())
-            row["superseded_count"] += 1
-            row["last_seen_at"] = event.recorded_at.isoformat()
-
-    return [
-        rows[key]
-        for key in sorted(rows, key=lambda item: (item[0], item[1]))
-    ]
-
-
-def _ensure_agent_performance_row(
-    rows: dict[tuple[str, str], dict[str, Any]],
-    key: tuple[str, str],
-    seen_at: str,
-) -> dict[str, Any]:
-    return rows.setdefault(
-        key,
-        {
-            "agent_id": key[0],
-            "model_version": key[1],
-            "analyses_completed": 0,
-            "decisions_generated": 0,
-            "approve_count": 0,
-            "decline_count": 0,
-            "refer_count": 0,
-            "human_override_count": 0,
-            "superseded_count": 0,
-            "total_confidence": 0.0,
-            "total_duration_ms": 0,
-            "first_seen_at": seen_at,
-            "last_seen_at": seen_at,
-        },
-    )
 
 
 async def _integrity_as_of(
