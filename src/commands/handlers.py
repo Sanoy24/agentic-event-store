@@ -258,34 +258,6 @@ async def handle_submit_application(
     log.info("application_submitted", applicant_id=cmd.applicant_id)
 
 
-# async def handle_request_document_upload(
-#     cmd: RequestDocumentUploadCommand,
-#     store: EventStore,
-# ) -> None:
-#     log = logger.bind(
-#         correlation_id=cmd.correlation_id,
-#         application_id=cmd.application_id,
-#     )
-#     structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
-
-#     async with application_lock(store, cmd.application_id):
-#         app = await LoanApplicationAggregate.load(store, cmd.application_id)
-
-#         new_events = [
-#             DocumentUploadRequested(
-#                 application_id=cmd.application_id,
-#             ),
-#         ]
-
-#         await store.append(
-#             stream_id=f"loan-{cmd.application_id}",
-#             events=new_events,
-#             expected_version=app.version,
-#             correlation_id=cmd.correlation_id,
-#         )
-#     log.info("document_upload_requested")
-
-
 async def handle_upload_document(
     cmd: UploadDocumentCommand,
     store: EventStore,
