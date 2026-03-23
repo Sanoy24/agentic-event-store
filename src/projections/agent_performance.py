@@ -177,3 +177,96 @@ class AgentPerformanceProjection(Projection):
             """,
             (event.recorded_at, agent_id),
         )
+
+
+def reconstruct_agent_performance_from_events(
+    events: list[StoredEvent],
+) -> list[dict[str, Any]]:
+    """
+    Reconstruct AgentPerformanceLedger row shapes from event history.
+
+    This mirrors the projection update semantics closely enough for
+    examination-package time travel without reading the live current-state table.
+    """
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def ensure_row(agent_id: str, model_version: str, seen_at: Any) -> dict[str, Any]:
+        return rows.setdefault(
+            (agent_id, model_version),
+            {
+                "agent_id": agent_id,
+                "model_version": model_version,
+                "analyses_completed": 0,
+                "decisions_generated": 0,
+                "approve_count": 0,
+                "decline_count": 0,
+                "refer_count": 0,
+                "human_override_count": 0,
+                "superseded_count": 0,
+                "total_confidence": 0.0,
+                "total_duration_ms": 0,
+                "first_seen_at": seen_at.isoformat() if hasattr(seen_at, "isoformat") else seen_at,
+                "last_seen_at": seen_at.isoformat() if hasattr(seen_at, "isoformat") else seen_at,
+            },
+        )
+
+    for event in events:
+        p = event.payload
+        seen_at = event.recorded_at
+        if event.event_type == "CreditAnalysisCompleted":
+            row = ensure_row(
+                p.get("agent_id", "unknown"),
+                p.get("model_version", "unknown"),
+                seen_at,
+            )
+            row["analyses_completed"] += 1
+            row["total_confidence"] += float(p.get("confidence_score", 0.0))
+            row["total_duration_ms"] += int(p.get("analysis_duration_ms", 0))
+            row["last_seen_at"] = seen_at.isoformat()
+        elif event.event_type == "FraudScreeningCompleted":
+            row = ensure_row(
+                p.get("agent_id", "unknown"),
+                p.get("screening_model_version", "unknown"),
+                seen_at,
+            )
+            row["analyses_completed"] += 1
+            row["last_seen_at"] = seen_at.isoformat()
+        elif event.event_type == "DecisionGenerated":
+            model_versions = p.get("model_versions", {})
+            row = ensure_row(
+                p.get("orchestrator_agent_id", "unknown"),
+                model_versions.get("orchestrator", "unknown")
+                if isinstance(model_versions, dict)
+                else "unknown",
+                seen_at,
+            )
+            row["decisions_generated"] += 1
+            recommendation = p.get("recommendation")
+            if recommendation == "APPROVE":
+                row["approve_count"] += 1
+            elif recommendation == "DECLINE":
+                row["decline_count"] += 1
+            elif recommendation == "REFER":
+                row["refer_count"] += 1
+            row["last_seen_at"] = seen_at.isoformat()
+        elif event.event_type == "HumanReviewCompleted" and p.get("override", False):
+            row = ensure_row(
+                p.get("reviewer_id", "unknown"),
+                "human",
+                seen_at,
+            )
+            row["human_override_count"] += 1
+            row["last_seen_at"] = seen_at.isoformat()
+        elif event.event_type == "AgentDecisionSuperseded":
+            row = ensure_row(
+                p.get("agent_id", "unknown"),
+                p.get("model_version", "unknown"),
+                seen_at,
+            )
+            row["superseded_count"] += 1
+            row["last_seen_at"] = seen_at.isoformat()
+
+    return [
+        rows[key]
+        for key in sorted(rows, key=lambda item: (item[0], item[1]))
+    ]
