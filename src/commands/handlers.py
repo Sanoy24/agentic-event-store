@@ -25,10 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.aggregates.agent_session import AgentSessionAggregate
 from src.aggregates.compliance_record import ComplianceRecordAggregate
-from src.aggregates.loan_application import (
-    ApplicationState,
-    LoanApplicationAggregate,
-)
+from src.aggregates.loan_application import ApplicationState, LoanApplicationAggregate
 from src.event_store import EventStore
 from src.integrity.audit_chain import run_integrity_check as execute_integrity_check
 from src.models.events import (
@@ -261,32 +258,32 @@ async def handle_submit_application(
     log.info("application_submitted", applicant_id=cmd.applicant_id)
 
 
-async def handle_request_document_upload(
-    cmd: RequestDocumentUploadCommand,
-    store: EventStore,
-) -> None:
-    log = logger.bind(
-        correlation_id=cmd.correlation_id,
-        application_id=cmd.application_id,
-    )
-    structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
+# async def handle_request_document_upload(
+#     cmd: RequestDocumentUploadCommand,
+#     store: EventStore,
+# ) -> None:
+#     log = logger.bind(
+#         correlation_id=cmd.correlation_id,
+#         application_id=cmd.application_id,
+#     )
+#     structlog.contextvars.bind_contextvars(correlation_id=cmd.correlation_id)
 
-    async with application_lock(store, cmd.application_id):
-        app = await LoanApplicationAggregate.load(store, cmd.application_id)
+#     async with application_lock(store, cmd.application_id):
+#         app = await LoanApplicationAggregate.load(store, cmd.application_id)
 
-        new_events = [
-            DocumentUploadRequested(
-                application_id=cmd.application_id,
-            ),
-        ]
+#         new_events = [
+#             DocumentUploadRequested(
+#                 application_id=cmd.application_id,
+#             ),
+#         ]
 
-        await store.append(
-            stream_id=f"loan-{cmd.application_id}",
-            events=new_events,
-            expected_version=app.version,
-            correlation_id=cmd.correlation_id,
-        )
-    log.info("document_upload_requested")
+#         await store.append(
+#             stream_id=f"loan-{cmd.application_id}",
+#             events=new_events,
+#             expected_version=app.version,
+#             correlation_id=cmd.correlation_id,
+#         )
+#     log.info("document_upload_requested")
 
 
 async def handle_upload_document(
@@ -821,6 +818,7 @@ async def handle_record_compliance_check(
 
     # Temporarily apply the new event to see if clearance is achieved
     import uuid
+
     from src.models.events import StoredEvent
 
     for ev in new_events:
