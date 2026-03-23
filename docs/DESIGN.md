@@ -81,34 +81,38 @@ Added fields:
 
 Upcasters always return new `StoredEvent` instances. The raw JSONB payload stored in `events` is never modified. The mandatory database-level immutability test verifies this.
 
-## 5. MCP Contract Design
+## 5. EventStoreDB Comparison
 
-The MCP layer is intentionally CQRS-shaped:
+This PostgreSQL implementation maps closely to core EventStoreDB ideas:
 
-- tools are commands
-- resources are queries
+- `stream_id` in `event_streams` and `events` maps to EventStoreDB stream IDs
+- `load_all()` maps to subscribing to the EventStoreDB `$all` stream
+- `ProjectionDaemon` maps to persistent subscriptions / projection consumers
+- `projection_checkpoints` plays the role EventStoreDB gives you more natively through subscription state management
+- `outbox` is the additional delivery layer we need because PostgreSQL is not a purpose-built event broker
 
-Required tool names are exposed directly: `submit_application`, `start_agent_session`, `record_credit_analysis`, `record_fraud_screening`, `record_compliance_check`, `generate_decision`, `record_human_review`, and `run_integrity_check`.
+What EventStoreDB would give us more directly:
 
-Two workflow gaps in the raw domain handlers are bridged in the MCP layer:
+- append/read APIs designed around streams instead of generic SQL tables
+- stronger subscription primitives for fan-out consumers
+- less custom work around checkpointing, replay coordination, and stream metadata conventions
+- fewer chances to accidentally bypass event-store invariants with ad hoc SQL
 
-1. `record_credit_analysis` bootstraps `CreditAnalysisRequested` if the application is freshly submitted, so the lifecycle is driveable through MCP without a hidden preparatory command.
-2. `record_compliance_check` can initialize the compliance record on first use when given `regulation_set_version` and `checks_required`, removing the need for a separate MCP-only setup step.
+What PostgreSQL gives us in exchange:
 
-Resources expose:
+- total control over schema and indexing
+- one operational data store for events, checkpoints, projections, and outbox
+- flexible SQL for rebuilds, shadow-table swaps, and ad hoc regulatory queries
 
-- `ledger://applications/{id}`
-- `ledger://applications/{id}/compliance` with optional `?as_of={timestamp}`
-- `ledger://applications/{id}/audit-trail`
-- `ledger://agents/{id}/performance`
-- `ledger://agents/{id}/sessions/{session_id}`
-- `ledger://ledger/health`
+The tradeoff is clear: PostgreSQL can absolutely support this system, but it makes us build and maintain more of the event-store ergonomics ourselves.
 
-`audit-trail` is the justified exception that reads directly from event streams. It loads the full application-linked event history, not just the loan stream, so the regulator can see credit, fraud, compliance, and human review facts in one ordered trace.
+## 6. What I Would Do Differently
 
-## 6. What I Would Change Next
+The single architectural decision I would revisit first is keeping the projection daemon and command write path on the same connection-pool class with the same storage engine responsibilities.
 
-1. Add an explicit dead-letter replay workflow for skipped projection events instead of only tracking them in `projection_failures`.
-2. Split read and write pools so heavy projection replay cannot compete with latency-sensitive appends.
-3. Introduce schema-registry style compatibility checks around event version changes to catch bad writes before they reach storage.
-4. Add stronger load tests for the combined ApplicationSummary and ComplianceAudit projections under sustained, not burst-only, concurrency.
+With another full day, I would separate the architecture more decisively into:
+
+1. a latency-sensitive append path with its own constrained pool and metrics
+2. a projection / replay subsystem with isolated resources and clearer dead-letter handling
+
+That would reduce the chance that rebuilds, replay-heavy diagnostics, or bursty projection work interfere with the core guarantee of low-latency atomic appends. It is the decision with the biggest impact on production resilience, and it is the one I would change before adding any new feature.
