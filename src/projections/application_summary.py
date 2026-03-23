@@ -593,3 +593,73 @@ class ApplicationSummaryProjection(Projection):
                 p["application_id"],
             ),
         )
+
+
+def reconstruct_application_summary_from_events(
+    application_id: str,
+    events: list[StoredEvent],
+) -> dict[str, Any]:
+    """
+    Reconstruct the ApplicationSummary row shape from event history.
+
+    This reuses the projection's own state-transition logic so bonus features
+    such as the regulatory package can return projection-faithful state.
+    """
+    projection = ApplicationSummaryProjection()
+    state = projection._empty_state(application_id, None)
+    seen_relevant_event = False
+
+    for event in events:
+        if (
+            event.stream_id != f"loan-{application_id}"
+            and event.payload.get("application_id") != application_id
+        ):
+            continue
+        projection._apply_to_state(state, event)
+        seen_relevant_event = True
+
+    if not seen_relevant_event:
+        return {"application_id": application_id}
+
+    return {
+        "application_id": state["application_id"],
+        "state": state["state"],
+        "applicant_id": state["applicant_id"],
+        "applicant_name": state["applicant_name"],
+        "requested_amount_usd": state["requested_amount_usd"],
+        "risk_tier": state["risk_tier"],
+        "confidence_score": state["confidence_score"],
+        "fraud_score": state["fraud_score"],
+        "compliance_status": state["compliance_status"],
+        "decision": state["decision"],
+        "human_reviewer_id": state["human_reviewer_id"],
+        "override": state["override"],
+        "override_reason": state["override_reason"],
+        "final_decision": state["final_decision"],
+        "approved_amount_usd": state["approved_amount_usd"],
+        "interest_rate": state["interest_rate"],
+        "conditions": state["conditions"] or [],
+        "final_decision_at": (
+            state["final_decision_at"].isoformat()
+            if hasattr(state["final_decision_at"], "isoformat")
+            else state["final_decision_at"]
+        ),
+        "last_event_type": state["last_event_type"],
+        "last_event_at": (
+            state["last_event_at"].isoformat()
+            if hasattr(state["last_event_at"], "isoformat")
+            else state["last_event_at"]
+        ),
+        "agent_sessions": list(state["agent_sessions"]),
+        "decline_reasons": list(state["decline_reasons"]),
+        "created_at": (
+            state["created_at"].isoformat()
+            if hasattr(state["created_at"], "isoformat")
+            else state["created_at"]
+        ),
+        "updated_at": (
+            state["last_event_at"].isoformat()
+            if hasattr(state["last_event_at"], "isoformat")
+            else state["last_event_at"]
+        ),
+    }
