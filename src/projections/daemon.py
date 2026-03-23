@@ -298,12 +298,13 @@ class ProjectionDaemon:
                                 event_count=len(relevant_events),
                             )
                         else:
-                            for event in relevant_events:
-                                await self._clear_projection_failure(
-                                    conn,
-                                    projection_name=name,
-                                    global_position=event.global_position,
-                                )
+                            await self._clear_projection_failures(
+                                conn,
+                                projection_name=name,
+                                global_positions=[
+                                    event.global_position for event in relevant_events
+                                ],
+                            )
                             self._checkpoints[name] = pending_events[-1].global_position
                             batch_processed = True
 
@@ -508,6 +509,24 @@ class ProjectionDaemon:
               AND global_position = %s
             """,
             (projection_name, global_position),
+        )
+
+    async def _clear_projection_failures(
+        self,
+        conn: Any,
+        *,
+        projection_name: str,
+        global_positions: list[int],
+    ) -> None:
+        if not global_positions:
+            return
+        await conn.execute(
+            """
+            DELETE FROM projection_failures
+            WHERE projection_name = %s
+              AND global_position = ANY(%s)
+            """,
+            (projection_name, global_positions),
         )
 
     async def _union_event_types(self) -> list[str] | None:
