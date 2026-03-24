@@ -39,7 +39,6 @@ from src.models.events import (
     CreditAnalysisCompleted,
     DecisionGenerated,
     DocumentUploaded,
-    DocumentUploadRequested,
     DomainError,
     FraudScreeningCompleted,
     HumanReviewCompleted,
