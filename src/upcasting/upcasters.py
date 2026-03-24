@@ -34,7 +34,10 @@ def upcast_credit_v1_to_v2(
       deployment timeline. ~15% error rate during Q3 2025 canary rollout.
     - model_deployment_id: Set to "unknown-pre-v2" — genuinely unknown
       for v1 events, as deployment tracking was not yet implemented.
-    - confidence_score: KEPT as-is if present in v1. v1 had this field.
+    - confidence_score: Normalized to None for v1 events. Historical
+      confidence values are treated as unavailable for strict challenge-doc
+      alignment; preserving an ambiguous legacy value would be worse than null
+      for audit, replay, and analytics consumers.
     - regulatory_basis: Inferred from recorded_at using known regulatory
       framework timeline.
 
@@ -51,7 +54,7 @@ def upcast_credit_v1_to_v2(
             _infer_model_version(recorded_at),
         ),
         "model_deployment_id": payload.get("model_deployment_id", "unknown-pre-v2"),
-        "confidence_score": payload.get("confidence_score"),
+        "confidence_score": None,
         "regulatory_basis": payload.get(
             "regulatory_basis",
             [_infer_regulatory_basis(recorded_at)],
