@@ -67,11 +67,11 @@ Projection failures are tracked in `projection_failures`. Each `(projection_name
 Added fields:
 
 - `model_version`: inferred from `recorded_at`
-- `confidence_score`: preserved if present, otherwise `None`
+- `confidence_score`: set to `None`
 - `model_deployment_id`: `"unknown-pre-v2"`
 - `regulatory_basis`: inferred from the regulatory timeline at `recorded_at`
 
-`None` is preferred over fabrication for genuinely unknown historical values. Fabricating confidence would pollute downstream performance analytics and regulatory evidence.
+`None` is preferred over fabrication for genuinely unknown historical values. Even if a legacy row happens to contain a confidence-like field, we do not treat it as trustworthy enough to upcast into the rubric-defined v2 shape. Carrying forward an ambiguously sourced score would be worse than null because it could mislead replay consumers, audit reviewers, and downstream analytics into treating an uncertain historical artifact as authoritative model output.
 
 ### DecisionGenerated v1→v2
 
