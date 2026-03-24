@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -32,6 +32,19 @@ async def _read_compliance(
                 at_time = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
             except ValueError:
                 return _json({"error": f"Invalid timestamp: {as_of}"})
+            db_now_result = await conn.execute("SELECT clock_timestamp()")
+            db_now_row = await db_now_result.fetchone()
+            db_now = db_now_row[0] if db_now_row is not None else None
+
+            if db_now is not None:
+                # MCP callers provide app/server wall-clock timestamps, while
+                # temporal projection reads are filtered against DB-clock event
+                # timestamps. Translate the caller timestamp into the database's
+                # clock domain to avoid skew collapsing recent history to
+                # "UNKNOWN" at the resource boundary.
+                app_now = datetime.now(timezone.utc)
+                at_time = at_time + (db_now - app_now)
+
             state = await get_compliance_at(conn, application_id, at_time)
         else:
             state = await get_current_compliance(conn, application_id)
