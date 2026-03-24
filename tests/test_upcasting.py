@@ -86,6 +86,29 @@ def test_credit_analysis_v1_to_v2_uses_recorded_at() -> None:
     assert upcasted.payload["model_deployment_id"] == "unknown-pre-v2"
 
 
+def test_credit_analysis_v1_to_v2_discards_legacy_confidence_score() -> None:
+    payload = {
+        "application_id": "loan-legacy-confidence",
+        "confidence_score": 0.73,
+    }
+    event = StoredEvent(
+        event_id=uuid4(),
+        stream_id="agent-credit-session",
+        stream_position=1,
+        global_position=1,
+        event_type="CreditAnalysisCompleted",
+        event_version=1,
+        payload=payload,
+        metadata={},
+        recorded_at=datetime(2025, 8, 1, 10, 0, tzinfo=timezone.utc),
+    )
+
+    upcasted = registry.upcast(event)
+    assert upcasted.payload["model_version"] == "credit-model-v2.2"
+    assert upcasted.payload["confidence_score"] is None
+    assert upcasted.payload["model_deployment_id"] == "unknown-pre-v2"
+
+
 @pytest.mark.asyncio
 async def test_decision_upcaster_reconstructs_model_versions(event_store) -> None:
     event_store._upcasters = registry
