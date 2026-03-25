@@ -233,7 +233,7 @@ async def test_mcp_lifecycle_runs_through_fastmcp_only(mcp_runtime) -> None:
         },
     )
     assert role_error["success"] is False
-    assert role_error["suggested_action"] == "check_preconditions"
+    assert role_error["suggested_action"] == "use_compliance_role"
 
     integrity_result = await mcp.call_tool(
         "run_integrity_check",
@@ -255,7 +255,7 @@ async def test_mcp_lifecycle_runs_through_fastmcp_only(mcp_runtime) -> None:
         },
     )
     assert rate_limited["success"] is False
-    assert rate_limited["suggested_action"] == "retry_later"
+    assert rate_limited["suggested_action"] == "retry_after_60_seconds"
 
     application_view = await _wait_for_json(
         mcp,
