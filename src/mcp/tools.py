@@ -428,7 +428,16 @@ def _register_with_fastmcp(mcp: Any, server: Any) -> None:
                 "tamper_detected": result.tamper_detected,
             }
         except Exception as e:
-            return {"success": False, "error": str(e), "error_type": type(e).__name__}
+            return {
+                "success": False,
+                "error_type": type(e).__name__,
+                "message": str(e),
+                "context": {
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                },
+                "suggested_action": "retry_or_contact_support",
+            }
 
 
 async def _execute_command(server: Any, handler_fn: Any, command: Any) -> dict:
@@ -440,18 +449,23 @@ async def _execute_command(server: Any, handler_fn: Any, command: Any) -> dict:
         return {
             "success": False,
             "error_type": "OptimisticConcurrencyError",
-            "stream_id": e.stream_id,
-            "expected_version": e.expected_version,
-            "actual_version": e.actual_version,
-            "suggested_action": e.suggested_action,
             "message": str(e),
+            "context": {
+                "stream_id": e.stream_id,
+                "expected_version": e.expected_version,
+                "actual_version": e.actual_version,
+            },
+            "suggested_action": e.suggested_action,
         }
     except DomainError as e:
         return {
             "success": False,
             "error_type": "DomainError",
             "message": str(e),
-            "suggested_action": "check_preconditions",
+            "context": {
+                "command_type": type(command).__name__,
+            },
+            "suggested_action": e.suggested_action or "check_preconditions",
         }
     except Exception as e:
         logger.exception("mcp_tool_error", command_type=type(command).__name__)
@@ -459,6 +473,10 @@ async def _execute_command(server: Any, handler_fn: Any, command: Any) -> dict:
             "success": False,
             "error_type": type(e).__name__,
             "message": str(e),
+            "context": {
+                "command_type": type(command).__name__,
+            },
+            "suggested_action": "retry_or_contact_support",
         }
 
 
@@ -504,6 +522,10 @@ async def _ensure_credit_analysis_requested(
             "success": False,
             "error_type": "DomainError",
             "message": f"Application {application_id} is not ready for analysis.",
+            "context": {
+                "application_id": application_id,
+                "current_state": str(app.state) if app.state else "unknown",
+            },
             "suggested_action": "check_preconditions",
         }
     return None
@@ -529,7 +551,14 @@ async def _ensure_compliance_requested(
                 "First compliance check requires regulation_set_version and "
                 "checks_required."
             ),
-            "suggested_action": "check_preconditions",
+            "context": {
+                "application_id": application_id,
+                "missing_fields": [
+                    f for f in ["regulation_set_version", "checks_required"]
+                    if not locals().get(f)
+                ],
+            },
+            "suggested_action": "provide_regulation_set_version_and_checks_required",
         }
 
     await handle_request_compliance_check(
@@ -566,7 +595,11 @@ async def _ensure_integrity_check_allowed(
             "success": False,
             "error_type": "DomainError",
             "message": "run_integrity_check may only be called by compliance role.",
-            "suggested_action": "check_preconditions",
+            "context": {
+                "provided_role": actor_role,
+                "required_role": "compliance",
+            },
+            "suggested_action": "use_compliance_role",
         }
 
     audit_events = await store.load_stream(f"audit-{entity_type}-{entity_id}")
@@ -582,7 +615,12 @@ async def _ensure_integrity_check_allowed(
                     "run_integrity_check is rate-limited to one call per minute "
                     f"for {entity_type}/{entity_id}."
                 ),
-                "suggested_action": "retry_later",
+                "context": {
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "seconds_since_last_check": int(delta.total_seconds()),
+                },
+                "suggested_action": "retry_after_60_seconds",
             }
         break
 
