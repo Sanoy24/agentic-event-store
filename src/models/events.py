@@ -790,15 +790,6 @@ class ComplianceCheckCompleted(BaseEvent):
     has_hard_block: bool
 
 
-class ComplianceRulePassed(BaseEvent):
-    """(ComplianceRecord aggregate, v1)"""
-
-    event_type: ClassVar[str] = "ComplianceCheckInitiated"
-    event_version: ClassVar[int] = 1
-
-    application_id: str
-    agent_id: str
-
 
 class ComplianceRuleNoted(BaseEvent):
     """(ComplianceRecord aggregate, v1)"""
