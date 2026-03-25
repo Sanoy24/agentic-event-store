@@ -291,6 +291,12 @@ async def test_mcp_lifecycle_runs_through_fastmcp_only(mcp_runtime) -> None:
             f"{urlencode({'from': 1, 'to': 20})}"
         ),
     )
+
+    print("\n\n--- Step 1: The Week Standard ---")
+    print(f"Complete Application Decision History via MCP:\n{json.dumps(audit_trail, indent=2, default=str)}")
+    print("Proving causality and cryptographic integrity!")
+    print("----------------------------------\n")
+
     event_types = {event["event_type"] for event in audit_trail["events"]}
     assert "ApplicationSubmitted" in event_types
     assert "CreditAnalysisCompleted" in event_types
@@ -319,3 +325,101 @@ async def test_mcp_lifecycle_runs_through_fastmcp_only(mcp_runtime) -> None:
     )
     assert health["projection_failures"]["pending"] == 0
     assert health["projections"]["ComplianceAuditView"]["lag_ms"] == 0
+
+
+@pytest.mark.asyncio
+async def test_temporal_compliance_via_mcp_uri(mcp_runtime) -> None:
+    """
+    Step 3 — Temporal Compliance Query via MCP Resource URI.
+
+    Demonstrates querying ledger://applications/{id}/compliance?as_of=...
+    to see compliance state at a past point in time.
+    """
+    mcp = mcp_runtime
+    application_id = f"app-{uuid4().hex[:8]}"
+
+    # Submit application
+    await mcp.call_tool(
+        "submit_application",
+        {
+            "application_id": application_id,
+            "applicant_id": "borrower-temporal",
+            "applicant_name": "Temporal Query Corp",
+            "requested_amount_usd": 300000,
+            "loan_purpose": "EQUIPMENT",
+            "submission_channel": "agent",
+        },
+    )
+
+    # First compliance check: KYC passes
+    first_check = await mcp.call_tool(
+        "record_compliance_check",
+        {
+            "application_id": application_id,
+            "rule_id": "KYC",
+            "rule_version": "kyc-v1.2",
+            "passed": True,
+            "evidence_hash": "evidence-kyc-temporal",
+            "regulation_set_version": "Basel-III-2026-Q1",
+            "checks_required": ["KYC", "AML"],
+        },
+    )
+    assert first_check["compliance_status"] == "IN_PROGRESS"
+
+    # Allow DB clock to advance past the KYC event timestamp
+    await asyncio.sleep(0.1)
+
+    # Capture as_of marker BETWEEN the two checks
+    as_of_marker = datetime.now(timezone.utc).isoformat()
+    await asyncio.sleep(0.1)
+
+    # Second compliance check: AML passes -> CLEARED
+    second_check = await mcp.call_tool(
+        "record_compliance_check",
+        {
+            "application_id": application_id,
+            "rule_id": "AML",
+            "rule_version": "aml-v3.0",
+            "passed": True,
+            "evidence_hash": "evidence-aml-temporal",
+        },
+    )
+    assert second_check["compliance_status"] == "CLEARED"
+
+    # Query CURRENT compliance via MCP resource URI
+    current_uri = f"ledger://applications/{application_id}/compliance"
+    current = await _wait_for_json(
+        mcp,
+        current_uri,
+        lambda p: p.get("compliance_status") == "CLEARED",
+    )
+
+    # Query HISTORICAL compliance via MCP resource URI with as_of query param
+    historical_uri = (
+        f"ledger://applications/{application_id}/compliance?"
+        f"{urlencode({'as_of': as_of_marker})}"
+    )
+    historical = await _read_json(mcp, historical_uri)
+
+    print("\n\n--- Step 3: Temporal Compliance Query (MCP Resource URI) ---")
+    print(f"Resource URI: {current_uri}")
+    print(
+        f"\n1) CURRENT Compliance State:\n"
+        f"{json.dumps(current, indent=2, default=str)}"
+    )
+    print(f"\nResource URI: {historical_uri}")
+    print(
+        f"\n2) HISTORICAL State at {as_of_marker} (Time Travel):\n"
+        f"{json.dumps(historical, indent=2, default=str)}"
+    )
+    print(
+        "\nThe same MCP URI, different point in time "
+        "-> different compliance state!"
+    )
+    print("--------------------------------------------------------------\n")
+
+    assert current["compliance_status"] == "CLEARED"
+    assert sorted(current["checks_passed"]) == ["AML", "KYC"]
+    assert historical["compliance_status"] == "IN_PROGRESS"
+    assert historical["checks_passed"] == ["KYC"]
+    assert historical["clearance_issued"] is False
