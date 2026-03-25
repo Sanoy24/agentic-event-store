@@ -51,12 +51,12 @@ If redesigned with The Ledger:
 
 The system uses four aggregates, each owning independent business invariants:
 
-| Aggregate | Stream Format | Core Invariant |
-|-----------|---------------|----------------|
-| LoanApplication | `loan-{uuid}` | Application lifecycle state machine |
-| AgentSession | `agent-{id}-{session}` | Gas Town context requirement |
-| ComplianceRecord | `compliance-{uuid}` | Mandatory check completion |
-| AuditLedger | `audit-{type}-{id}` | Append-only, cross-stream causal ordering |
+| Aggregate        | Stream Format          | Core Invariant                            |
+| ---------------- | ---------------------- | ----------------------------------------- |
+| LoanApplication  | `loan-{uuid}`          | Application lifecycle state machine       |
+| AgentSession     | `agent-{id}-{session}` | Gas Town context requirement              |
+| ComplianceRecord | `compliance-{uuid}`    | Mandatory check completion                |
+| AuditLedger      | `audit-{type}-{id}`    | Append-only, cross-stream causal ordering |
 
 #### The Rejected Alternative
 
@@ -209,11 +209,11 @@ The API response must include projection lag metadata:
 
 ```json
 {
-  "application_id": "loan-001",
-  "credit_limit": 500000,
-  "projection_lag_ms": 150,
-  "data_as_of": "2026-03-16T12:00:00.150Z",
-  "last_event_at": "2026-03-16T12:00:00.000Z"
+    "application_id": "loan-001",
+    "credit_limit": 500000,
+    "projection_lag_ms": 150,
+    "data_as_of": "2026-03-16T12:00:00.150Z",
+    "last_event_at": "2026-03-16T12:00:00.000Z"
 }
 ```
 
@@ -294,6 +294,7 @@ def _infer_regulatory_basis(recorded_at: str | None) -> str:
 This is a deliberate decision. Justification from Manual Part II Cluster C, "Upcaster" Note: "Never fabricate a value that will be treated as accurate data."
 
 **Why not fabricate?** If `confidence_score` were fabricated as `0.75`:
+
 - A downstream compliance system would treat that value as a measured model output and include it in regulatory reports.
 - An auditor examining a 2024 decision would see a confidence score that never existed in the original model output.
 - Model performance analysis for 2024 would include fabricated data points, corrupting statistical analyses.
@@ -317,12 +318,12 @@ For `model_version`, an incorrect inference means compliance reports attribute a
 
 ```json
 {
-  "inferred_fields": ["model_version", "regulatory_basis"],
-  "inference_confidence": {
-    "model_version": 0.85,
-    "regulatory_basis": 0.95
-  },
-  "inference_method": "timestamp_based_deployment_timeline"
+    "inferred_fields": ["model_version", "regulatory_basis"],
+    "inference_confidence": {
+        "model_version": 0.85,
+        "regulatory_basis": 0.95
+    },
+    "inference_method": "timestamp_based_deployment_timeline"
 }
 ```
 
@@ -354,6 +355,7 @@ async def try_acquire_projection_lock(
 ```
 
 **Why advisory locks?** They are:
+
 - **Lightweight:** No table or row contention. Advisory locks live in shared memory.
 - **Session-scoped:** Automatically released when the database connection drops (node crash = instant release).
 - **Non-blocking:** `pg_try_advisory_lock` returns immediately, unlike `pg_advisory_lock` which waits.
@@ -383,6 +385,7 @@ class DistributedProjectionDaemon:
 ```
 
 Distribution across 3 nodes with 3 projections:
+
 - Node A: acquires `ApplicationSummary` lock → processes it
 - Node B: acquires `AgentPerformanceLedger` lock → processes it
 - Node C: acquires `ComplianceAuditView` lock → processes it
@@ -449,12 +452,12 @@ The Event Catalogue is "intentionally incomplete" (Challenge Doc p.6). Four miss
 
 ### 2.1 Aggregate Boundaries
 
-| Aggregate | Stream Format | Invariant Owned |
-|-----------|---------------|-----------------|
-| LoanApplication | `loan-{application_id}` | Lifecycle transitions, human decision outcome, contributing-session validity |
-| AgentSession | `agent-{agent_id}-{session_id}` | Gas Town precondition: no agent decision before context declaration |
-| ComplianceRecord | `compliance-{application_id}` | Required-rule completion, per-rule pass/fail state, clearance issuance |
-| AuditLedger | `audit-{entity_type}-{entity_id}` | Integrity-check chain continuity and tamper detection |
+| Aggregate        | Stream Format                     | Invariant Owned                                                              |
+| ---------------- | --------------------------------- | ---------------------------------------------------------------------------- |
+| LoanApplication  | `loan-{application_id}`           | Lifecycle transitions, human decision outcome, contributing-session validity |
+| AgentSession     | `agent-{agent_id}-{session_id}`   | Gas Town precondition: no agent decision before context declaration          |
+| ComplianceRecord | `compliance-{application_id}`     | Required-rule completion, per-rule pass/fail state, clearance issuance       |
+| AuditLedger      | `audit-{entity_type}-{entity_id}` | Integrity-check chain continuity and tamper detection                        |
 
 The main rejected alternative was folding `ComplianceRecord` into `LoanApplication`. That would force every compliance rule result to contend on the loan stream and turn parallel checks into artificial optimistic-concurrency failures. Keeping compliance separate means credit, fraud, and compliance work can progress independently while the loan aggregate still observes the resulting facts through cross-stream replay.
 
@@ -462,11 +465,11 @@ The main rejected alternative was folding `ComplianceRecord` into `LoanApplicati
 
 All projections run asynchronously behind `ProjectionDaemon`. The write path stays fast and projections can be rebuilt by replaying the immutable log.
 
-| Projection | Read Purpose | SLO |
-|-----------|--------------|-----|
-| ApplicationSummary | Operator dashboard and application lookup | lag under 500ms |
-| AgentPerformanceLedger | Agent/model analytics | no hard real-time requirement |
-| ComplianceAuditView | Regulatory examination and time-travel | lag under 2000ms |
+| Projection             | Read Purpose                              | SLO                           |
+| ---------------------- | ----------------------------------------- | ----------------------------- |
+| ApplicationSummary     | Operator dashboard and application lookup | lag under 500ms               |
+| AgentPerformanceLedger | Agent/model analytics                     | no hard real-time requirement |
+| ComplianceAuditView    | Regulatory examination and time-travel    | lag under 2000ms              |
 
 **Compliance Snapshot Strategy:** `ComplianceAuditView` uses three tables: `compliance_audit_view` (current full state), `compliance_audit_events` (immutable per-event audit log), and `compliance_audit_snapshots` (periodic state snapshots keyed by source event). `get_compliance_at(application_id, timestamp)` first loads the newest snapshot at or before `timestamp`, then replays only the later `compliance_audit_events`. Snapshots are written every three compliance events and on terminal-style events such as `ComplianceClearanceIssued`. This keeps temporal reads bounded without sacrificing exact replay semantics.
 
@@ -721,50 +724,55 @@ graph LR
 > **Note:** Please replace this section with the output of `uv run pytest tests/ -v` before PDF generation.
 
 ```text
+(trp1-ledger)
 HP@DESKTOP-7ABE0SQ MINGW64 /d/Personal/10-acedamy/week-five/agentic-event-store (main)
 $ uv run pytest tests/ -v
 ================================================ test session starts ================================================
-platform win32 -- Python 3.12.12, pytest-9.0.2, pluggy-1.6.0
+platform win32 -- Python 3.12.12, pytest-9.0.2, pluggy-1.6.0 -- D:\Personal\10-acedamy\week-five\agentic-event-store\.venv\Scripts\python.exe
+cachedir: .pytest_cache
 rootdir: D:\Personal\10-acedamy\week-five\agentic-event-store
 configfile: pyproject.toml
 plugins: anyio-4.12.1, langsmith-0.7.22, asyncio-1.3.0
-asyncio: mode=Mode.AUTO, debug=False
-collected ?? items
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 32 items
 
-tests/test_concurrency.py::test_double_decision_concurrency PASSED
-tests/test_concurrency.py::test_new_stream_creation PASSED
-tests/test_concurrency.py::test_stream_version_nonexistent PASSED
-tests/test_concurrency.py::test_load_stream_empty PASSED
-tests/test_concurrency.py::test_metadata_contains_correlation_id PASSED
-tests/test_concurrency.py::test_archive_stream PASSED
-tests/test_handlers.py::test_credit_analysis_written_to_agent_session_stream PASSED
-tests/test_handlers.py::test_generate_decision_rejects_invalid_contributing_sessions PASSED
-tests/test_handlers.py::test_application_approval_checks_compliance_record_stream PASSED
-tests/test_handlers.py::test_audit_integrity_check_creates_hash_chain PASSED
-tests/test_projections.py::test_compliance_audit_current_and_temporal_queries PASSED
-tests/test_projections.py::test_compliance_projection_creates_snapshots PASSED
-tests/test_projections.py::test_compliance_projection_lag_metric PASSED
-tests/test_projections.py::test_compliance_rebuild_from_scratch_preserves_history PASSED
-tests/test_projections.py::test_projection_daemon_skips_after_configured_retries PASSED
-tests/test_projections.py::test_projection_lag_slos_under_50_concurrent_command_handlers PASSED
-tests/test_upcasting.py::test_registry_register_and_upcast PASSED
-tests/test_upcasting.py::test_registry_multi_step_chain PASSED
-tests/test_upcasting.py::test_credit_analysis_v1_to_v2_uses_recorded_at PASSED
-tests/test_upcasting.py::test_credit_analysis_v1_to_v2_discards_legacy_confidence_score PASSED
-tests/test_upcasting.py::test_decision_upcaster_reconstructs_model_versions PASSED
-tests/test_upcasting.py::test_upcasting_immutability_via_database PASSED
-tests/test_upcasting.py::test_credit_analysis_v1_to_v2_direct_helper PASSED
-tests/test_gas_town.py::test_empty_session_returns_empty_context PASSED
-tests/test_gas_town.py::test_context_loaded_only_is_healthy PASSED
-tests/test_gas_town.py::test_crash_recovery_with_five_events PASSED
-tests/test_gas_town.py::test_partial_last_event_needs_reconciliation PASSED
-tests/test_gas_town.py::test_no_context_loaded_returns_no_context PASSED
-tests/test_mcp_lifecycle.py::test_mcp_contract_exposes_required_tools_and_resources PASSED
-tests/test_mcp_lifecycle.py::test_mcp_lifecycle_runs_through_fastmcp_only PASSED
-tests/test_phase6_bonus.py::test_generate_regulatory_package_returns_projection_states_as_of_examination_date PASSED
-tests/test_phase6_bonus.py::test_run_what_if_high_risk_invalidates_downstream_decision_path PASSED
+tests/test_concurrency.py::test_double_decision_concurrency PASSED                                             [  3%]
+tests/test_concurrency.py::test_new_stream_creation PASSED                                                     [  6%]
+tests/test_concurrency.py::test_stream_version_nonexistent PASSED                                              [  9%]
+tests/test_concurrency.py::test_load_stream_empty PASSED                                                       [ 12%]
+tests/test_concurrency.py::test_metadata_contains_correlation_id PASSED                                        [ 15%]
+tests/test_concurrency.py::test_archive_stream PASSED                                                          [ 18%]
+tests/test_gas_town.py::test_empty_session_returns_empty_context PASSED                                        [ 21%]
+tests/test_gas_town.py::test_context_loaded_only_is_healthy PASSED                                             [ 25%]
+tests/test_gas_town.py::test_crash_recovery_with_five_events PASSED                                            [ 28%]
+tests/test_gas_town.py::test_partial_last_event_needs_reconciliation PASSED                                    [ 31%]
+tests/test_gas_town.py::test_no_context_loaded_returns_no_context PASSED                                       [ 34%]
+tests/test_handlers.py::test_credit_analysis_written_to_agent_session_stream PASSED                            [ 37%]
+tests/test_handlers.py::test_generate_decision_rejects_invalid_contributing_sessions PASSED                    [ 40%]
+tests/test_handlers.py::test_application_approval_checks_compliance_record_stream PASSED                       [ 43%]
+tests/test_handlers.py::test_audit_integrity_check_creates_hash_chain PASSED                                   [ 46%]
+tests/test_mcp_lifecycle.py::test_mcp_contract_exposes_required_tools_and_resources PASSED                     [ 50%]
+tests/test_mcp_lifecycle.py::test_mcp_lifecycle_runs_through_fastmcp_only PASSED                               [ 53%]
+tests/test_phase6_bonus.py::test_generate_regulatory_package_returns_projection_states_as_of_examination_date PASSED [ 56%]
+tests/test_phase6_bonus.py::test_run_what_if_high_risk_invalidates_downstream_decision_path PASSED             [ 59%]
+tests/test_projections.py::test_compliance_audit_current_and_temporal_queries PASSED                           [ 62%]
+tests/test_projections.py::test_compliance_projection_creates_snapshots PASSED                                 [ 65%]
+tests/test_projections.py::test_compliance_projection_lag_metric PASSED                                        [ 68%]
+tests/test_projections.py::test_compliance_rebuild_from_scratch_preserves_history PASSED                       [ 71%]
+tests/test_projections.py::test_projection_daemon_skips_after_configured_retries PASSED                        [ 75%]
+tests/test_projections.py::test_projection_lag_slos_under_50_concurrent_command_handlers PASSED                [ 78%]
+tests/test_upcasting.py::test_registry_register_and_upcast PASSED                                              [ 81%]
+tests/test_upcasting.py::test_registry_multi_step_chain PASSED                                                 [ 84%]
+tests/test_upcasting.py::test_credit_analysis_v1_to_v2_uses_recorded_at PASSED                                 [ 87%]
+tests/test_upcasting.py::test_credit_analysis_v1_to_v2_discards_legacy_confidence_score PASSED                 [ 90%]
+tests/test_upcasting.py::test_decision_upcaster_reconstructs_model_versions PASSED                             [ 93%]
+tests/test_upcasting.py::test_upcasting_immutability_via_database PASSED                                       [ 96%]
+tests/test_upcasting.py::test_credit_analysis_v1_to_v2_direct_helper PASSED                                    [100%]
 
-================================================ ?? passed in ??s ================================================
+================================================ 32 passed in 19.62s ================================================
+(trp1-ledger)
+HP@DESKTOP-7ABE0SQ MINGW64 /d/Personal/10-acedamy/week-five/agentic-event-store (main)
+$
 ```
 
 > **Action required:** Run `uv run pytest tests/ -v` and paste the actual output above before converting to PDF.
@@ -793,67 +801,67 @@ The `FOR UPDATE` row-level lock serialises concurrent appends to the same stream
 
 ### Phase 1 — Event Store Core
 
-| Component | Status | Details |
-|-----------|--------|---------|
-| PostgreSQL schema | ✅ Complete | All 4 tables: `events`, `event_streams`, `projection_checkpoints`, `outbox` |
-| `EventStore.append()` | ✅ Complete | Atomic write with OCC, outbox in same transaction, metadata envelope |
-| `EventStore.load_stream()` | ✅ Complete | Position-bounded stream reads, upcasting on load |
-| `EventStore.load_application_events()` | ✅ Complete | Cross-stream replay across loan, agent-session, and compliance streams |
-| `EventStore.load_all()` | ✅ Complete | Async generator with batching and optional event-type filtering |
-| `EventStore.stream_version()` | ✅ Complete | O(1) lookup via `event_streams` primary key |
-| `EventStore.archive_stream()` | ✅ Complete | Soft archive with `archived_at`, rejects future appends |
-| Double-decision concurrency test | ✅ Complete | 2 concurrent tasks, exactly 1 succeeds, 1 gets OCC error, total = 4 events |
+| Component                              | Status      | Details                                                                     |
+| -------------------------------------- | ----------- | --------------------------------------------------------------------------- |
+| PostgreSQL schema                      | ✅ Complete | All 4 tables: `events`, `event_streams`, `projection_checkpoints`, `outbox` |
+| `EventStore.append()`                  | ✅ Complete | Atomic write with OCC, outbox in same transaction, metadata envelope        |
+| `EventStore.load_stream()`             | ✅ Complete | Position-bounded stream reads, upcasting on load                            |
+| `EventStore.load_application_events()` | ✅ Complete | Cross-stream replay across loan, agent-session, and compliance streams      |
+| `EventStore.load_all()`                | ✅ Complete | Async generator with batching and optional event-type filtering             |
+| `EventStore.stream_version()`          | ✅ Complete | O(1) lookup via `event_streams` primary key                                 |
+| `EventStore.archive_stream()`          | ✅ Complete | Soft archive with `archived_at`, rejects future appends                     |
+| Double-decision concurrency test       | ✅ Complete | 2 concurrent tasks, exactly 1 succeeds, 1 gets OCC error, total = 4 events  |
 
 ### Phase 2 — Domain Logic
 
-| Component | Status | Details |
-|-----------|--------|---------|
-| `LoanApplicationAggregate` | ✅ Complete | 9-state machine, application-level replay via `load()` |
-| `AgentSessionAggregate` | ✅ Complete | Gas Town enforcement and model-version tracking |
+| Component                   | Status      | Details                                                           |
+| --------------------------- | ----------- | ----------------------------------------------------------------- |
+| `LoanApplicationAggregate`  | ✅ Complete | 9-state machine, application-level replay via `load()`            |
+| `AgentSessionAggregate`     | ✅ Complete | Gas Town enforcement and model-version tracking                   |
 | `ComplianceRecordAggregate` | ✅ Complete | Separate compliance stream replay, required/passed check tracking |
-| `AuditLedgerAggregate` | ✅ Complete | Cryptographic hash chain, tamper detection |
-| Business Rules 1-6 | ✅ Complete | All 6 rules enforced in command handlers |
-| Command handlers | ✅ Complete | 6 handlers implemented |
-| Event catalogue | ✅ Complete | All events including 4 identified missing events |
+| `AuditLedgerAggregate`      | ✅ Complete | Cryptographic hash chain, tamper detection                        |
+| Business Rules 1-6          | ✅ Complete | All 6 rules enforced in command handlers                          |
+| Command handlers            | ✅ Complete | 6 handlers implemented                                            |
+| Event catalogue             | ✅ Complete | All events including 4 identified missing events                  |
 
 ### Phase 3 — Projections & Async Daemon
 
-| Component | Status | Details |
-|-----------|--------|---------|
-| `ProjectionDaemon` | ✅ Complete | Fault-tolerant batch processing, per-projection checkpoints, `get_lag()`, `rebuild_projection()` |
-| `ApplicationSummaryProjection` | ✅ Complete | One row per application, upsert-based, SLO < 500ms lag |
-| `AgentPerformanceLedger` | ✅ Complete | Metrics per agent model version (rate, duration, confidence) |
-| `ComplianceAuditProjection` | ✅ Complete | Temporal query support with `get_compliance_at(app_id, timestamp)`, snapshot strategy, zero-downtime rebuild |
-| `tests/test_projections.py` | ✅ Complete | 6 tests covering current/temporal queries, snapshots, lag metrics, rebuild, fault tolerance, SLO under 50 concurrent workflows |
+| Component                      | Status      | Details                                                                                                                        |
+| ------------------------------ | ----------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `ProjectionDaemon`             | ✅ Complete | Fault-tolerant batch processing, per-projection checkpoints, `get_lag()`, `rebuild_projection()`                               |
+| `ApplicationSummaryProjection` | ✅ Complete | One row per application, upsert-based, SLO < 500ms lag                                                                         |
+| `AgentPerformanceLedger`       | ✅ Complete | Metrics per agent model version (rate, duration, confidence)                                                                   |
+| `ComplianceAuditProjection`    | ✅ Complete | Temporal query support with `get_compliance_at(app_id, timestamp)`, snapshot strategy, zero-downtime rebuild                   |
+| `tests/test_projections.py`    | ✅ Complete | 6 tests covering current/temporal queries, snapshots, lag metrics, rebuild, fault tolerance, SLO under 50 concurrent workflows |
 
 ### Phase 4 — Upcasting, Integrity & Gas Town
 
-| Component | Status | Details |
-|-----------|--------|---------|
-| `UpcasterRegistry` | ✅ Complete | Automatic version-chain application on load, multi-step chains |
-| `CreditAnalysisCompleted` v1→v2 | ✅ Complete | Timestamp-based inference, `None` for confidence score |
-| `DecisionGenerated` v1→v2 | ✅ Complete | Reconstructs `model_versions` by loading agent-session streams at read time |
-| `AuditChain` | ✅ Complete | SHA-256 hash chain, tamper detection |
-| `reconstruct_agent_context()` | ✅ Complete | Gas Town crash-recovery, session health status, pending work detection |
-| `tests/test_upcasting.py` | ✅ Complete | 7 tests including immutability database-level verification |
-| `tests/test_gas_town.py` | ✅ Complete | 5 tests covering crash recovery, health status, pending work |
+| Component                       | Status      | Details                                                                     |
+| ------------------------------- | ----------- | --------------------------------------------------------------------------- |
+| `UpcasterRegistry`              | ✅ Complete | Automatic version-chain application on load, multi-step chains              |
+| `CreditAnalysisCompleted` v1→v2 | ✅ Complete | Timestamp-based inference, `None` for confidence score                      |
+| `DecisionGenerated` v1→v2       | ✅ Complete | Reconstructs `model_versions` by loading agent-session streams at read time |
+| `AuditChain`                    | ✅ Complete | SHA-256 hash chain, tamper detection                                        |
+| `reconstruct_agent_context()`   | ✅ Complete | Gas Town crash-recovery, session health status, pending work detection      |
+| `tests/test_upcasting.py`       | ✅ Complete | 7 tests including immutability database-level verification                  |
+| `tests/test_gas_town.py`        | ✅ Complete | 5 tests covering crash recovery, health status, pending work                |
 
 ### Phase 5 — MCP Server
 
-| Component | Status | Details |
-|-----------|--------|---------|
-| `LedgerServer` | ✅ Complete | Connection lifecycle, pool management |
-| `src/mcp/tools.py` | ✅ Complete | 8 command-side tools: `submit_application`, `start_agent_session`, `record_credit_analysis`, `record_fraud_screening`, `record_compliance_check`, `generate_decision`, `record_human_review`, `run_integrity_check` |
-| `src/mcp/resources.py` | ✅ Complete | 6 query-side resources: application view, compliance (with `as_of` temporal), audit trail, agent performance, agent session, ledger health |
-| `tests/test_mcp_lifecycle.py` | ✅ Complete | 2 end-to-end tests: contract verification and full lifecycle through MCP only |
+| Component                     | Status      | Details                                                                                                                                                                                                             |
+| ----------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LedgerServer`                | ✅ Complete | Connection lifecycle, pool management                                                                                                                                                                               |
+| `src/mcp/tools.py`            | ✅ Complete | 8 command-side tools: `submit_application`, `start_agent_session`, `record_credit_analysis`, `record_fraud_screening`, `record_compliance_check`, `generate_decision`, `record_human_review`, `run_integrity_check` |
+| `src/mcp/resources.py`        | ✅ Complete | 6 query-side resources: application view, compliance (with `as_of` temporal), audit trail, agent performance, agent session, ledger health                                                                          |
+| `tests/test_mcp_lifecycle.py` | ✅ Complete | 2 end-to-end tests: contract verification and full lifecycle through MCP only                                                                                                                                       |
 
 ### Phase 6 — Bonus
 
-| Component | Status | Details |
-|-----------|--------|---------|
-| `WhatIfProjector` | ✅ Complete | Counterfactual projection with causal dependency filtering, removes downstream events invalidated by hypothetical change |
-| `RegulatoryPackage` | ✅ Complete | Self-contained JSON examination package with temporal projection states, agent session summaries, package hash |
-| `tests/test_phase6_bonus.py` | ✅ Complete | 2 tests covering regulatory package temporal accuracy and what-if causal pruning |
+| Component                    | Status      | Details                                                                                                                  |
+| ---------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `WhatIfProjector`            | ✅ Complete | Counterfactual projection with causal dependency filtering, removes downstream events invalidated by hypothetical change |
+| `RegulatoryPackage`          | ✅ Complete | Self-contained JSON examination package with temporal projection states, agent session summaries, package hash           |
+| `tests/test_phase6_bonus.py` | ✅ Complete | 2 tests covering regulatory package temporal accuracy and what-if causal pruning                                         |
 
 ---
 
