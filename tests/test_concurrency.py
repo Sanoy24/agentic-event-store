@@ -202,6 +202,12 @@ async def test_double_decision_concurrency(
 
     # (a) Total events in stream = 4 (not 5)
     final_version = await event_store.stream_version(f"loan-{application_id}")
+
+    print("\n\n--- Step 2: Concurrency Under Pressure ---")
+    print(f"Agent A success: {agent_a_result.get('success')}")
+    print(f"Agent B success: {agent_b_result.get('success')}")
+    print(f"Final stream version: {final_version} (Expected: 4 - exactly one analysis succeeded)")
+
     assert final_version == 4, (
         f"Total events should be 4, got {final_version}. "
         "OCC failed: both agents' events were accepted."
@@ -214,6 +220,11 @@ async def test_double_decision_concurrency(
 
     # (c) Loser received OptimisticConcurrencyError — not silently swallowed
     loser_error = failures[0]["error"]
+
+    print(f"Loser Error: OptimisticConcurrencyError - expected {loser_error.expected_version}, actual {loser_error.actual_version}")
+    print("Split-brain state avoided without locking!")
+    print("------------------------------------------\n")
+
     assert isinstance(loser_error, OptimisticConcurrencyError), (
         f"Loser should receive OptimisticConcurrencyError, got {type(loser_error)}"
     )
@@ -238,6 +249,111 @@ async def test_double_decision_concurrency(
     assert positions == [1, 2, 3, 4], (
         f"Stream positions should be [1, 2, 3, 4], got {positions}"
     )
+
+
+async def test_double_decision_concurrency_with_retry(
+    event_store: EventStore,
+    application_id: str,
+) -> None:
+    """
+    Double-Decision Concurrency Test WITH RETRY.
+
+    Same race condition as above, but the losing agent follows the
+    suggested_action='reload_stream_and_retry' pattern to recover.
+    Both agents' events end up in the stream.
+    """
+    await _setup_stream_at_version_3(event_store, application_id)
+
+    start_signal = anyio.Event()
+    agent_a_result: dict = {}
+    agent_b_result: dict = {}
+
+    async def agent_task_with_retry(
+        task_name: str, result_holder: dict
+    ) -> None:
+        await start_signal.wait()
+        expected_version = 3
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                new_version = await event_store.append(
+                    stream_id=f"loan-{application_id}",
+                    events=[
+                        _make_credit_analysis_event(application_id, task_name)
+                    ],
+                    expected_version=expected_version,
+                    correlation_id=f"corr-{task_name}-attempt-{attempt}",
+                )
+                result_holder["success"] = True
+                result_holder["new_version"] = new_version
+                result_holder["attempts"] = attempt
+                return
+            except OptimisticConcurrencyError as e:
+                result_holder["retried"] = True
+                print(
+                    f"  [{task_name}] Attempt {attempt}: "
+                    f"OptimisticConcurrencyError "
+                    f"(expected={e.expected_version}, "
+                    f"actual={e.actual_version}). "
+                    f"Suggested action: {e.suggested_action}"
+                )
+                # Reload stream to get current version
+                expected_version = await event_store.stream_version(
+                    f"loan-{application_id}"
+                )
+                print(
+                    f"  [{task_name}] Reloaded stream version: "
+                    f"{expected_version}. Retrying..."
+                )
+
+        result_holder["success"] = False
+        result_holder["error"] = "Max retries exceeded"
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(agent_task_with_retry, "agent-a", agent_a_result)
+        tg.start_soon(agent_task_with_retry, "agent-b", agent_b_result)
+        start_signal.set()
+
+    # --- Assertions ---
+    print("\n\n--- Step 2: Concurrency Under Pressure (with Retry) ---")
+    print(
+        f"Agent A: success={agent_a_result.get('success')}, "
+        f"attempts={agent_a_result.get('attempts')}, "
+        f"retried={agent_a_result.get('retried', False)}"
+    )
+    print(
+        f"Agent B: success={agent_b_result.get('success')}, "
+        f"attempts={agent_b_result.get('attempts')}, "
+        f"retried={agent_b_result.get('retried', False)}"
+    )
+
+    assert agent_a_result["success"] is True
+    assert agent_b_result["success"] is True
+
+    final_version = await event_store.stream_version(
+        f"loan-{application_id}"
+    )
+    print(
+        f"Final stream version: {final_version} "
+        "(both agents succeeded after retry)"
+    )
+    assert final_version == 5
+
+    events = await event_store.load_stream(f"loan-{application_id}")
+    positions = [e.stream_position for e in events]
+    assert positions == [1, 2, 3, 4, 5]
+
+    retried_count = sum(
+        1 for r in [agent_a_result, agent_b_result] if r.get("retried")
+    )
+    print(f"Agents that retried: {retried_count}")
+    print(
+        "Split-brain avoided AND loser recovered via "
+        "reload_stream_and_retry!"
+    )
+    print("------------------------------------------------------\n")
+
+    assert retried_count == 1
 
 
 async def test_new_stream_creation(event_store: EventStore) -> None:
